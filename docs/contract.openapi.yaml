@@ -1,0 +1,1433 @@
+openapi: 3.1.0
+info:
+  title: PI Platform API, ERPCons Office consumer contract
+  version: 0.1.0
+  summary: The subset of the PI Platform (PI ID, organizations, devices, entitlements) that ERPCons Office calls.
+  license:
+    name: MIT OR Apache-2.0
+    identifier: MIT OR Apache-2.0
+  description: |
+    Consumer contract of ERPCons Office (products `vanban`, `bangtinh`, `trinhchieu`, `pdf`; native
+    desktop apps and wasm web apps on `https://office.erpcons.ai`). It lists only what Office calls.
+    The PI Platform team owns the implementation; Office builds against a mock of this document.
+    Companion documents: `lease.md` (lease, device proof, feature catalog JWS, trusted time),
+    `products.md` (product registry, feature catalog, `allowed(feature)`), `adr/` (decisions;
+    `adr/0000-source-inconsistencies.md` maps every deviation from the PI spec package).
+
+    Keywords MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
+
+    ## 1. OIDC usage
+
+    **Discovery.** The client fetches `{issuer}/.well-known/openid-configuration` (OpenID Connect
+    Discovery 1.0) and requires `issuer` to equal the configured issuer exactly. It uses
+    `authorization_endpoint`, `token_endpoint`, `revocation_endpoint` (RFC 7009),
+    `end_session_endpoint` (optional) and `code_challenge_methods_supported`, which MUST contain `S256`.
+    The issuer URL is also the `iss` of every lease and feature catalog (`lease.md`).
+
+    **Clients.** Both are public clients (`token_endpoint_auth_method: none`, no client secret).
+
+    | `client_id` | Build | `redirect_uri` | Scopes requested |
+    |---|---|---|---|
+    | `erpcons-office-desktop` | the 4 native apps, sharing one session per OS user (ADR 0010) | `http://127.0.0.1:{port}/callback`; the server MUST accept any port (RFC 8252 §7.3). IPv4 literal, not `localhost` | `openid profile email offline_access pi.entitlements pi.devices` |
+    | `erpcons-office-web` | `office.erpcons.ai` | `https://office.erpcons.ai/dang-nhap/callback/` (exact string match) | `openid profile email offline_access pi.entitlements` |
+
+    The platform MUST NOT grant `pi.devices` to `erpcons-office-web` (web never activates devices, ADR 0004).
+
+    **Scopes.**
+
+    | Scope | Grants |
+    |---|---|
+    | `openid` | OIDC sign-in, ID token |
+    | `profile` | `GET /v1/me` (with `openid`) |
+    | `email` | `email` in the ID token and in `GET /v1/me` |
+    | `offline_access` | refresh tokens |
+    | `pi.entitlements` | `GET /v1/me/entitlements` |
+    | `pi.devices` | `POST /v1/devices/challenges`, `POST /v1/devices/activate`, `POST /v1/licenses/refresh` |
+
+    **Flow.** Authorization Code with PKCE (RFC 7636) is mandatory: the server MUST reject an
+    authorization request without `code_challenge` or with `code_challenge_method=plain`. `state` and
+    `nonce` are always sent. Desktop opens the system browser (RFC 8252; never an embedded web view) and
+    receives the code on a loopback listener bound to `127.0.0.1` on an ephemeral port for one request.
+    Web opens `https://office.erpcons.ai/dang-nhap/` in a popup window, because editor tabs hold unsaved
+    documents and must not navigate away; the callback page exchanges the code and closes itself.
+
+    Additional authorization request parameters:
+
+    | Parameter | Value | Meaning |
+    |---|---|---|
+    | `org_context` | an `org_id` from `GET /v1/me` memberships, or `personal` | Organization context of the issued tokens (ADR 0008). Absent: `personal` |
+    | `ui_locales` | `vi` or `en` (OIDC Core §3.1.2.1) | Sign-in page language; Office sends its UI language |
+
+    **Token endpoint.** `grant_type=authorization_code` (with `code_verifier`, `redirect_uri`,
+    `client_id`) and `grant_type=refresh_token` (with `refresh_token`, `client_id`, optional
+    `org_context` as above; absent keeps the current context). Responses contain `access_token`,
+    `token_type: Bearer`, `expires_in`, `refresh_token`, `scope`, and `id_token` for the code grant.
+    Switching organization is a refresh grant with a new `org_context`; the server MUST check that the
+    membership is active and return `invalid_grant` otherwise.
+
+    **Refresh-token rotation (required).** Every `refresh_token` grant returns a new refresh token and
+    invalidates the presented one. Presenting an invalidated refresh token MUST revoke the whole token
+    family and return `invalid_grant` (RFC 9700 §4.14.2). Clients serialize refreshes so that rotation
+    never races itself: web uses Web Locks across tabs; desktop uses an exclusive file lock shared by
+    the four apps, which share one refresh token (ADR 0010).
+
+    | Lifetime (proposed; platform to confirm) | `erpcons-office-desktop` | `erpcons-office-web` |
+    |---|---|---|
+    | Access token | 60 min | 5 min |
+    | Refresh token, idle | 30 days | 7 days |
+    | Refresh token, absolute | 90 days | 30 days |
+
+    Refresh tokens MUST be opaque and at most 1024 bytes (Windows Credential Manager limits a credential
+    blob to 2560 bytes).
+
+    **Access tokens** are opaque to Office: the client never parses them. Resource servers read the HS05
+    claims `iss`, `aud` (the PI Platform API), `sub` (`user_id`), `org_context` (`org_id`, or `null` for
+    the personal context), `scope` (RFC 9068 §2.2.3; HS05 calls it `scopes`) and `exp`, and MUST check
+    the membership behind `org_context` before touching any tenant resource (HS05).
+
+    **ID token.** The client checks `iss`, `aud` = its `client_id`, `exp` and `nonce`. It is received
+    directly from the token endpoint over TLS, so signature verification is optional (OIDC Core
+    §3.1.3.7 item 6). Identity shown in the UI comes from `GET /v1/me`.
+
+    **Sign-out.** The client calls `revocation_endpoint` with `token_type_hint=refresh_token`, then
+    deletes local tokens, identity and lease whether or not the call succeeded. Web MAY then open
+    `end_session_endpoint` in the popup to end the PI ID browser session.
+
+    **CORS.** For origin `https://office.erpcons.ai` the discovery document, token endpoint, revocation
+    endpoint and every path below MUST answer CORS: allowed request headers `Authorization`,
+    `Content-Type`, `Idempotency-Key`, `X-Correlation-Id`; exposed response headers `X-Correlation-Id`,
+    `Retry-After`. No cookies are used (`credentials: omit`).
+
+    ## 2. Conventions
+
+    - JSON in UTF-8. HTTP bodies use RFC 3339 UTC timestamps; JWS payloads use NumericDate seconds.
+    - Clients ignore unknown response fields. New fields are additive; a breaking change needs `/v2`.
+    - **Errors** are RFC 9457 `application/problem+json` with a stable `code` and the request's
+      `correlation_id`. Clients branch on `code`, never on `title` or `detail`; an unknown `code` is
+      handled by its HTTP status.
+    - **Idempotency-Key** is required on every POST below (UUID). The server keeps key and response for
+      at least 24 h, scoped to (`sub`, `client_id`, path). The same key with the same body replays the
+      stored response; with a different body it returns 422 `idempotency_key_reused`; while the first
+      request is still running it returns 409 `idempotency_in_progress`. The client creates one key per
+      logical operation and reuses it on every retry of that operation.
+    - **X-Correlation-Id** (UUID) is optional on requests and always present on responses: the server
+      echoes the client value or generates one. Problem bodies repeat it as `correlation_id`. The
+      platform MAY record it as its `trace_id` (HS05).
+    - Authenticated responses carry `Cache-Control: no-store`.
+    - 429 and 503 carry `Retry-After` (seconds; MAY be absent on 503). Without it, clients back off
+      exponentially from 1 s to 5 min with full jitter.
+    - No list here is paginated: memberships are capped at 100, entitlements per product at 200.
+    - Privacy (HS02): requests carry no document content, file names, paths, host names or hardware
+      identifiers. `installation_id` is a random UUIDv4. Desktop sends
+      `User-Agent: ERPCons-<VanBan|BangTinh|TrinhChieu|PDF>/<client_version>` as erpcons-update does.
+
+    ## 3. Error codes
+
+    | HTTP | `code` | Meaning | Client action |
+    |---|---|---|---|
+    | 400 | `invalid_request` | Malformed request or parameter | Log with `correlation_id`; no retry |
+    | 400 | `idempotency_key_missing` | POST without `Idempotency-Key` | Client bug; no retry |
+    | 401 | `unauthenticated` | Access token missing, expired or revoked | Refresh once and retry; `invalid_grant` on refresh signs out locally |
+    | 403 | `insufficient_scope` | Token lacks the operation's scope | Sign in again with the documented scopes |
+    | 403 | `membership_inactive` | `org_context` is not an active membership | Switch to `personal`, delete the org lease |
+    | 403 | `user_suspended` | PI ID suspended | Sign out locally |
+    | 403 | `device_revoked` | This device is revoked in this context | Delete every lease and `device_id`; no automatic activation until the next sign-in |
+    | 403 | `device_unknown` | `device_id` unknown, not the caller's in this context, or proof key differs | Delete `device_id` and every lease; activate again |
+    | 403 | `forbidden` | Other policy denial | Free features only; no retry |
+    | 409 | `device_cap_reached` | Device limit for this user and context reached (devices are machines with an OS user, not apps) | Free features only; show where to manage devices; retry only on user action |
+    | 409 | `installation_key_mismatch` | `installation_id` is registered with another device key | New `installation_id` and device key; activate again once |
+    | 409 | `idempotency_in_progress` | Same key still running | Retry with the same key after `Retry-After` |
+    | 412 | `client_version_unsupported` | `client_version` below the platform minimum (HS05 `version_mismatch`) | Keep current lease; offer the app update |
+    | 422 | `validation_failed` | Body fails the schema; see `errors` | Client bug; no retry |
+    | 422 | `challenge_invalid` | Nonce unknown, expired or used; proof signature or fields wrong | New challenge, new `Idempotency-Key`, retry once |
+    | 422 | `idempotency_key_reused` | Same key, different body | Client bug; no retry |
+    | 429 | `rate_limited` | Too many requests or platform overload | Wait `Retry-After` |
+    | 429 | `quota_exceeded` | A metered quota is exhausted (unused by Office today) | Tell the user; no automatic retry |
+    | 503 | `dependency_unavailable` | A platform dependency is down | Wait and retry; keep current lease |
+
+    Whatever the error, free features keep working and the current lease stays as it is unless the
+    action column says to delete it (`lease.md` §8).
+servers:
+  - url: https://{host}
+    description: PI Platform. The host is not assigned yet.
+    variables:
+      host:
+        default: id.pi.invalid
+        description: Placeholder until the PI Platform team assigns the production host.
+  - url: http://127.0.0.1:{port}
+    description: Local mock used by Office development and contract tests.
+    variables:
+      port:
+        default: '8787'
+tags:
+  - name: identity
+    description: Signed-in user and organization memberships.
+  - name: entitlements
+    description: Entitlements and the public feature catalog.
+  - name: devices
+    description: Device activation and offline leases (HS02 V2 activation contract).
+paths:
+  /v1/me:
+    get:
+      operationId: getMe
+      tags: [identity]
+      summary: Current user, organization context and memberships
+      description: |
+        Returns the user behind the access token, the token's `org_context` and the user's memberships
+        with status `active`, `invited` or `suspended` (revoked memberships are omitted; HS02: revoking a
+        membership never deletes the personal account). Office calls it after sign-in and after every
+        organization switch, and caches `user_id` and `org_context` for offline lease checks.
+      security:
+        - piOidc: [openid, profile]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: The user.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/X-Correlation-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control-NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Me'
+              examples:
+                organization:
+                  $ref: '#/components/examples/MeOrganization'
+                personal:
+                  $ref: '#/components/examples/MePersonal'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/me/entitlements:
+    get:
+      operationId: listMyEntitlements
+      tags: [entitlements]
+      summary: Entitlements of the current user for one product
+      description: |
+        Entitlements effective now for the token's `sub` in the token's `org_context`: every
+        `personal` entitlement of the user, plus, when `org_context` is an organization, that
+        organization's `organization` entitlements for which the user holds an assigned seat. Never
+        entitlements of another organization (HS02 tenant isolation). Only entitlements with
+        `valid_from <= now < valid_to` are returned, so the client does not compare times.
+
+        The organization context comes from the access token claim, not from a header or query
+        parameter (ADR 0008). Office uses this list for the online path of `allowed(feature)`
+        (`products.md` §4) and to show the user what they hold. The server enforces entitlements for
+        its own cloud APIs; this list is advisory for client-side features.
+      security:
+        - piOidc: [pi.entitlements]
+      parameters:
+        - $ref: '#/components/parameters/ProductIdQuery'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Entitlements for the product (possibly empty).
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/X-Correlation-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control-NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EntitlementList'
+              examples:
+                organizationSeat:
+                  $ref: '#/components/examples/EntitlementsOrganization'
+                none:
+                  $ref: '#/components/examples/EntitlementsNone'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/products/{product_id}/feature-catalog:
+    get:
+      operationId: getFeatureCatalog
+      tags: [entitlements]
+      summary: Signed feature catalog of a product (public)
+      description: |
+        Returns the product's feature catalog as a compact JWS signed with a platform licence-signing
+        key (`lease.md` §10, `products.md` §3). It maps each feature to a tier (`free` or `pro`) and is
+        what lets the platform move a feature to `pro` without a client release. No authentication:
+        guests need it too. The response is identical for every caller and cacheable.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ProductIdPath'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: The signed catalog.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/X-Correlation-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control-Public'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeatureCatalogResponse'
+              examples:
+                vanban:
+                  $ref: '#/components/examples/FeatureCatalogVanban'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/devices/challenges:
+    post:
+      operationId: createDeviceChallenge
+      tags: [devices]
+      summary: Get a single-use nonce for a device proof
+      description: |
+        First step of activation and of lease refresh. The server creates a random 32-byte nonce,
+        bound to (`sub`, `org_context`, `installation_id`, `product_id`, `purpose`), valid for 120 s and
+        usable once. The client signs it with its device key into `signed_challenge` (`lease.md` §3).
+      security:
+        - piOidc: [pi.devices]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChallengeRequest'
+            examples:
+              activate:
+                $ref: '#/components/examples/ChallengeRequestActivate'
+      responses:
+        '201':
+          description: Nonce issued.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/X-Correlation-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control-NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChallengeResponse'
+              examples:
+                activate:
+                  $ref: '#/components/examples/ChallengeResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableContent'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/devices/activate:
+    post:
+      operationId: activateDevice
+      tags: [devices]
+      summary: Activate this installation for a product and get a lease
+      description: |
+        HS02 V2 activation. Only signed-in desktop clients call it (ADR 0004). The four Office desktop
+        apps of one OS user on one machine share one `installation_id` and device key (ADR 0010), so a
+        device is registered once per (`installation_id`, `sub`, `org_context`) and the device cap counts
+        machines, not apps. Each app activates its own `product_id` and receives a lease for that
+        product only. Activating an installation already registered in the same (`sub`, `org_context`)
+        with the same device key, for any product, returns the existing `device_id` and a fresh lease
+        for the requested product, and does not count against the device cap again.
+
+        The device public key travels in the `jwk` header of `signed_challenge`. The server MUST, in
+        this order: verify `signed_challenge` with that key (`alg` exactly `EdDSA`, `crv` `Ed25519`,
+        `typ` `pi-device-proof+jwt`); check that the nonce exists, is unexpired, unused, issued for
+        `purpose: activate` and bound to this `sub`, `org_context`, `installation_id` and `product_id`;
+        check that `installation_id`, `product_id`, `platform` and `client_version` in the proof equal
+        the body; reject an `installation_id` already registered with another key (409
+        `installation_key_mismatch`); apply the device cap to a new device only (409
+        `device_cap_reached`); store the key's RFC 7638 thumbprint; issue a lease whose `cnf.jkt` is that thumbprint and whose `nonce` is the
+        challenge nonce.
+
+        A user without any entitlement for the product still activates successfully and gets a lease
+        with empty `rights`/`features` (V2 lists 403 for "no right"; here 403 means "not allowed to
+        activate", see ADR 0000).
+
+        `entitlement_ids`, `rights`, `offline_valid_until` and `policy_version` are unsigned copies of
+        the lease claims `entitlement_ids`, `features`, `exp` and `policy_version`. The client uses only
+        the verified lease and rejects the response if a copy differs from its claim (`lease.md` §9).
+      security:
+        - piOidc: [pi.devices]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActivateRequest'
+            examples:
+              windows:
+                $ref: '#/components/examples/ActivateRequest'
+      responses:
+        '200':
+          description: Device active; lease issued.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/X-Correlation-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control-NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActivationResponse'
+              examples:
+                organizationSeat:
+                  $ref: '#/components/examples/ActivationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '422':
+          $ref: '#/components/responses/UnprocessableContent'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/licenses/refresh:
+    post:
+      operationId: refreshLease
+      tags: [devices]
+      summary: Renew the lease of an active device, or learn that it was revoked
+      description: |
+        Called by an activated, signed-in desktop client when online (`lease.md` §6). Requires a fresh
+        challenge with `purpose: refresh`. The server verifies the proof as for activation and also
+        that the proof key's thumbprint equals the one registered for `device_id`, and that `device_id`
+        belongs to `sub` in the token's `org_context`; otherwise 403 `device_unknown`. The lease is
+        renewed for the body's `product_id` only. Refresh never consumes a device slot and never
+        returns 409 `device_cap_reached`.
+
+        Result `status: active` carries a new lease reflecting current entitlements (rights may grow or
+        shrink). Result `status: revoked` concerns the device, not one product, and tells the client to
+        delete every lease of the device: the device was revoked,
+        the membership behind the lease's organization was revoked, or the user was suspended. These
+        are reported as 200 `revoked`, never as 403, so that the client can tell "drop the lease" from
+        "request not allowed". HS02: revocation reaches an offline device only when it next refreshes.
+      security:
+        - piOidc: [pi.devices]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+            examples:
+              windows:
+                $ref: '#/components/examples/RefreshRequest'
+      responses:
+        '200':
+          description: Lease renewed, or device revoked.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/X-Correlation-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control-NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefreshResponse'
+              examples:
+                active:
+                  $ref: '#/components/examples/RefreshActive'
+                revoked:
+                  $ref: '#/components/examples/RefreshRevoked'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '422':
+          $ref: '#/components/responses/UnprocessableContent'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+components:
+  securitySchemes:
+    piOidc:
+      type: openIdConnect
+      openIdConnectUrl: https://id.pi.invalid/.well-known/openid-configuration
+      description: |
+        PI ID OpenID Connect provider. Clients `erpcons-office-desktop` and `erpcons-office-web`,
+        Authorization Code + PKCE S256 only, refresh-token rotation, scopes and claims as in section 1
+        of the API description. Requests send `Authorization: Bearer <access_token>`.
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: One UUID per logical operation, reused on every retry of it.
+      schema:
+        type: string
+        format: uuid
+      example: 0b6f4c7e-2d1a-4f3b-9c8e-5a7d6e1f2b3c
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      description: Client-generated UUID; echoed in the response and in problem bodies.
+      schema:
+        type: string
+        format: uuid
+      example: 3c9a1e52-7f04-4d6b-8a2e-1b5c9d0f7e64
+    ProductIdQuery:
+      name: product_id
+      in: query
+      required: true
+      schema:
+        $ref: '#/components/schemas/ProductId'
+      example: vanban
+    ProductIdPath:
+      name: product_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/ProductId'
+      example: vanban
+  headers:
+    X-Correlation-Id:
+      description: The request's correlation id, echoed or generated by the server.
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Cache-Control-NoStore:
+      description: Always `no-store` on authenticated responses.
+      schema:
+        type: string
+        const: no-store
+    Cache-Control-Public:
+      description: Public and cacheable, for example `public, max-age=3600`.
+      schema:
+        type: string
+    Retry-After:
+      description: Seconds to wait before retrying.
+      schema:
+        type: integer
+        minimum: 0
+    WWW-Authenticate:
+      description: RFC 6750 challenge, for example `Bearer error="invalid_token"`.
+      schema:
+        type: string
+  responses:
+    BadRequest:
+      description: '`invalid_request` or `idempotency_key_missing`.'
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/X-Correlation-Id'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            invalidRequest:
+              $ref: '#/components/examples/ProblemInvalidRequest'
+    Unauthorized:
+      description: '`unauthenticated`.'
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/X-Correlation-Id'
+        WWW-Authenticate:
+          $ref: '#/components/headers/WWW-Authenticate'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            unauthenticated:
+              $ref: '#/components/examples/ProblemUnauthenticated'
+    Forbidden:
+      description: |
+        `insufficient_scope`, `membership_inactive`, `user_suspended`, `forbidden`; on activation also
+        `device_revoked`; on refresh also `device_unknown`.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/X-Correlation-Id'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            membershipInactive:
+              $ref: '#/components/examples/ProblemMembershipInactive'
+            deviceRevoked:
+              $ref: '#/components/examples/ProblemDeviceRevoked'
+            deviceUnknown:
+              $ref: '#/components/examples/ProblemDeviceUnknown'
+    Conflict:
+      description: |
+        `idempotency_in_progress` on any POST; on activation also `device_cap_reached` and
+        `installation_key_mismatch`.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/X-Correlation-Id'
+        Retry-After:
+          $ref: '#/components/headers/Retry-After'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            deviceCapReached:
+              $ref: '#/components/examples/ProblemDeviceCap'
+            installationKeyMismatch:
+              $ref: '#/components/examples/ProblemInstallationKeyMismatch'
+            idempotencyInProgress:
+              $ref: '#/components/examples/ProblemIdempotencyInProgress'
+    PreconditionFailed:
+      description: '`client_version_unsupported` (HS05 `412 version_mismatch`).'
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/X-Correlation-Id'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            clientVersionUnsupported:
+              $ref: '#/components/examples/ProblemClientVersion'
+    UnprocessableContent:
+      description: '`validation_failed`, `challenge_invalid` or `idempotency_key_reused`.'
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/X-Correlation-Id'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            validationFailed:
+              $ref: '#/components/examples/ProblemValidation'
+            challengeInvalid:
+              $ref: '#/components/examples/ProblemChallengeInvalid'
+    TooManyRequests:
+      description: '`rate_limited` or `quota_exceeded`.'
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/X-Correlation-Id'
+        Retry-After:
+          $ref: '#/components/headers/Retry-After'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            rateLimited:
+              $ref: '#/components/examples/ProblemRateLimited'
+    ServiceUnavailable:
+      description: '`dependency_unavailable`.'
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/X-Correlation-Id'
+        Retry-After:
+          $ref: '#/components/headers/Retry-After'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            dependencyUnavailable:
+              $ref: '#/components/examples/ProblemDependency'
+  schemas:
+    OpaqueId:
+      type: string
+      description: Platform-assigned identifier. Clients compare it byte for byte and never parse it.
+      minLength: 1
+      maxLength: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
+    ProductId:
+      type: string
+      description: Product registry id (`products.md` §1). Reuses the existing Office app ids.
+      enum: [vanban, bangtinh, trinhchieu, pdf]
+    FeatureId:
+      type: string
+      description: '`<product_id>.<name>` (`products.md` §2).'
+      maxLength: 64
+      pattern: '^(vanban|bangtinh|trinhchieu|pdf)\.[a-z0-9_]+(\.[a-z0-9_]+)*$'
+    OrgContext:
+      type: [string, 'null']
+      description: '`org_id` of the organization context, or `null` for the personal context.'
+      minLength: 1
+      maxLength: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
+    PolicyVersion:
+      type: string
+      description: Revision of the platform licensing policy that produced the entitlement or lease.
+      minLength: 1
+      maxLength: 64
+    InstallationId:
+      type: string
+      format: uuid
+      description: Random UUIDv4 created at the first sign-in on a machine with an OS credential store; one per OS user and machine, shared by the four desktop apps (ADR 0010).
+    Platform:
+      type: string
+      description: Operating system of the desktop app. Web never activates.
+      enum: [windows, macos, linux]
+    ClientVersion:
+      type: string
+      description: App version `major.minor.patch` (the fork's `CARGO_PKG_VERSION`).
+      maxLength: 32
+      pattern: '^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$'
+    Nonce:
+      type: string
+      description: 32 random bytes, base64url without padding.
+      pattern: '^[A-Za-z0-9_-]{43}$'
+    CompactJws:
+      type: string
+      description: |
+        JWS compact serialization (RFC 7515 §7.1). Where a property has `contentSchema`, that schema
+        describes the decoded JWS as `{header, payload}`: the protected header and the payload JSON.
+      maxLength: 8192
+      pattern: '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$'
+    Role:
+      type: string
+      description: HS02 organization roles.
+      enum: [org_owner, org_admin, license_admin, member, auditor]
+    Membership:
+      type: object
+      required: [org_id, name, role, status]
+      properties:
+        org_id:
+          $ref: '#/components/schemas/OpaqueId'
+        name:
+          type: string
+          maxLength: 200
+        role:
+          $ref: '#/components/schemas/Role'
+        status:
+          type: string
+          enum: [active, invited, suspended]
+    Me:
+      type: object
+      required: [user_id, display_name, email, status, org_context, memberships]
+      properties:
+        user_id:
+          $ref: '#/components/schemas/OpaqueId'
+        display_name:
+          type: string
+          maxLength: 200
+        email:
+          type: [string, 'null']
+          format: email
+          description: Present with scope `email` and a verified email; `null` for phone-only accounts.
+        status:
+          type: string
+          enum: [active, suspended]
+        org_context:
+          $ref: '#/components/schemas/OrgContext'
+        memberships:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/Membership'
+    Quota:
+      type: object
+      description: Informational for Office; the platform enforces quotas server-side.
+      required: [limit, unit, period]
+      properties:
+        limit:
+          type: integer
+          minimum: 0
+        unit:
+          type: string
+          maxLength: 32
+        period:
+          type: string
+          enum: [day, month, none]
+    Entitlement:
+      type: object
+      description: HS02 entitlement. One feature per entitlement.
+      required:
+        - entitlement_id
+        - product_id
+        - feature
+        - scope
+        - org_id
+        - quota
+        - seats
+        - valid_from
+        - valid_to
+        - offline_allowed
+        - offline_days
+        - policy_version
+      properties:
+        entitlement_id:
+          $ref: '#/components/schemas/OpaqueId'
+        product_id:
+          $ref: '#/components/schemas/ProductId'
+        feature:
+          $ref: '#/components/schemas/FeatureId'
+        scope:
+          type: string
+          description: '`personal`: held by the user. `organization`: held by `org_id`, used through an assigned seat.'
+          enum: [personal, organization]
+        org_id:
+          type: [string, 'null']
+          description: Owning organization when `scope` is `organization`, else `null`. Always equals the token's `org_context`.
+          maxLength: 128
+        quota:
+          anyOf:
+            - $ref: '#/components/schemas/Quota'
+            - type: 'null'
+        seats:
+          type: [integer, 'null']
+          description: Seats purchased by the organization; `null` for `personal`. Informational.
+          minimum: 1
+        valid_from:
+          type: string
+          format: date-time
+        valid_to:
+          type: [string, 'null']
+          format: date-time
+          description: '`null`: no end date.'
+        offline_allowed:
+          type: boolean
+          description: Whether the feature may be granted by an offline lease. `false` means online path only (`products.md` §4).
+        offline_days:
+          type: [integer, 'null']
+          description: Offline window for leases carrying this feature (`lease.md` §5). Required when `offline_allowed`, else `null`.
+          enum: [7, 30, 90, null]
+        policy_version:
+          $ref: '#/components/schemas/PolicyVersion'
+    EntitlementList:
+      type: object
+      required: [product_id, org_context, entitlements]
+      properties:
+        product_id:
+          $ref: '#/components/schemas/ProductId'
+        org_context:
+          $ref: '#/components/schemas/OrgContext'
+        entitlements:
+          type: array
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/Entitlement'
+    FeatureCatalogResponse:
+      type: object
+      required: [catalog]
+      properties:
+        catalog:
+          allOf:
+            - $ref: '#/components/schemas/CompactJws'
+          description: Signed feature catalog, `typ` `pi-feature-catalog+jwt` (`products.md` §3).
+          contentMediaType: application/jose
+          contentSchema:
+            $ref: '#/components/schemas/FeatureCatalogJws'
+    ChallengeRequest:
+      type: object
+      required: [purpose, installation_id, product_id]
+      properties:
+        purpose:
+          type: string
+          enum: [activate, refresh]
+        installation_id:
+          $ref: '#/components/schemas/InstallationId'
+        product_id:
+          $ref: '#/components/schemas/ProductId'
+    ChallengeResponse:
+      type: object
+      required: [nonce, expires_at]
+      properties:
+        nonce:
+          $ref: '#/components/schemas/Nonce'
+        expires_at:
+          type: string
+          format: date-time
+          description: 120 s after issue. Informational; the client does not compare it with its own clock.
+    ActivateRequest:
+      type: object
+      required: [installation_id, product_id, platform, client_version, signed_challenge]
+      properties:
+        installation_id:
+          $ref: '#/components/schemas/InstallationId'
+        product_id:
+          $ref: '#/components/schemas/ProductId'
+        platform:
+          $ref: '#/components/schemas/Platform'
+        client_version:
+          $ref: '#/components/schemas/ClientVersion'
+        signed_challenge:
+          allOf:
+            - $ref: '#/components/schemas/CompactJws'
+          description: Device proof, `typ` `pi-device-proof+jwt`, public key in the `jwk` header (`lease.md` §3).
+          contentMediaType: application/jose
+          contentSchema:
+            $ref: '#/components/schemas/DeviceProofJws'
+    RefreshRequest:
+      type: object
+      required: [device_id, installation_id, product_id, platform, client_version, signed_challenge]
+      properties:
+        device_id:
+          $ref: '#/components/schemas/OpaqueId'
+        installation_id:
+          $ref: '#/components/schemas/InstallationId'
+        product_id:
+          $ref: '#/components/schemas/ProductId'
+        platform:
+          $ref: '#/components/schemas/Platform'
+        client_version:
+          $ref: '#/components/schemas/ClientVersion'
+        signed_challenge:
+          allOf:
+            - $ref: '#/components/schemas/CompactJws'
+          description: Device proof with `purpose` `refresh` and `device_id` (`lease.md` §3).
+          contentMediaType: application/jose
+          contentSchema:
+            $ref: '#/components/schemas/DeviceProofJws'
+    ActivationResponse:
+      type: object
+      required: [device_id, entitlement_ids, rights, offline_valid_until, policy_version, lease]
+      properties:
+        device_id:
+          $ref: '#/components/schemas/OpaqueId'
+        entitlement_ids:
+          type: array
+          description: Copy of lease claim `entitlement_ids` (HS02 V2 `entitlement_id`, pluralised; ADR 0000).
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/OpaqueId'
+        rights:
+          type: array
+          description: Copy of lease claim `features` (HS02 V2 `rights`).
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/FeatureId'
+        offline_valid_until:
+          type: string
+          format: date-time
+          description: Copy of lease claim `exp`.
+        policy_version:
+          $ref: '#/components/schemas/PolicyVersion'
+        lease:
+          allOf:
+            - $ref: '#/components/schemas/CompactJws'
+          description: The signed lease (HS02 V2 `signature`), `typ` `pi-lease+jwt`. Authoritative.
+          contentMediaType: application/jose
+          contentSchema:
+            $ref: '#/components/schemas/LeaseJws'
+    LeaseRenewed:
+      allOf:
+        - $ref: '#/components/schemas/ActivationResponse'
+        - type: object
+          required: [status]
+          properties:
+            status:
+              type: string
+              const: active
+    LeaseRevoked:
+      type: object
+      required: [status, device_id, reason, revoked_at]
+      properties:
+        status:
+          type: string
+          const: revoked
+        device_id:
+          $ref: '#/components/schemas/OpaqueId'
+        reason:
+          type: string
+          description: |
+            `device_revoked`: the device was removed by the user or an admin. `membership_revoked`: the
+            membership behind the lease's `org` ended. `user_suspended`: the PI ID is suspended.
+          enum: [device_revoked, membership_revoked, user_suspended]
+        revoked_at:
+          type: string
+          format: date-time
+    RefreshResponse:
+      oneOf:
+        - $ref: '#/components/schemas/LeaseRenewed'
+        - $ref: '#/components/schemas/LeaseRevoked'
+      discriminator:
+        propertyName: status
+        mapping:
+          active: '#/components/schemas/LeaseRenewed'
+          revoked: '#/components/schemas/LeaseRevoked'
+    Problem:
+      type: object
+      description: RFC 9457 problem details with extension members `code` and `correlation_id`.
+      required: [type, title, status, code, correlation_id]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: Platform-defined problem type URI. Clients ignore it and use `code`.
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri-reference
+        code:
+          type: string
+          description: Stable machine code (API description, section 3).
+          pattern: '^[a-z][a-z0-9_]*$'
+          maxLength: 64
+        correlation_id:
+          type: string
+          format: uuid
+        errors:
+          type: array
+          description: Only with `validation_failed`.
+          items:
+            type: object
+            required: [pointer, code]
+            properties:
+              pointer:
+                type: string
+                description: RFC 6901 JSON Pointer into the request body.
+              code:
+                type: string
+              detail:
+                type: string
+        max_devices:
+          type: integer
+          description: Only with `device_cap_reached`.
+          minimum: 0
+        active_devices:
+          type: integer
+          description: Only with `device_cap_reached`.
+          minimum: 0
+    DeviceProofJws:
+      type: object
+      description: Decoded `signed_challenge`.
+      required: [header, payload]
+      properties:
+        header:
+          $ref: '#/components/schemas/DeviceProofHeader'
+        payload:
+          $ref: '#/components/schemas/DeviceProofClaims'
+    LeaseJws:
+      type: object
+      description: Decoded lease.
+      required: [header, payload]
+      properties:
+        header:
+          $ref: '#/components/schemas/PlatformSignedHeader'
+        payload:
+          $ref: '#/components/schemas/LeaseClaims'
+    FeatureCatalogJws:
+      type: object
+      description: Decoded feature catalog.
+      required: [header, payload]
+      properties:
+        header:
+          $ref: '#/components/schemas/PlatformSignedHeader'
+        payload:
+          $ref: '#/components/schemas/FeatureCatalogClaims'
+    PlatformSignedHeader:
+      type: object
+      description: |
+        Protected header of a lease or feature catalog (`lease.md` §2). No other member is allowed;
+        `jku`, `x5u`, `jwk`, `x5c` and `crit` are rejected.
+      required: [alg, kid, typ]
+      additionalProperties: false
+      properties:
+        alg:
+          type: string
+          const: EdDSA
+        kid:
+          type: string
+          description: Key id; must be one of the keys pinned in the client (`lease.md` §10).
+          minLength: 1
+          maxLength: 64
+        typ:
+          type: string
+          enum: [pi-lease+jwt, pi-feature-catalog+jwt]
+    DeviceProofHeader:
+      type: object
+      description: Protected header of `signed_challenge` (`lease.md` §3).
+      required: [alg, typ, jwk]
+      properties:
+        alg:
+          type: string
+          const: EdDSA
+        typ:
+          type: string
+          const: pi-device-proof+jwt
+        jwk:
+          type: object
+          required: [kty, crv, x]
+          properties:
+            kty:
+              type: string
+              const: OKP
+            crv:
+              type: string
+              const: Ed25519
+            x:
+              type: string
+              pattern: '^[A-Za-z0-9_-]{43}$'
+    DeviceProofClaims:
+      type: object
+      description: Payload of `signed_challenge` (`lease.md` §3).
+      required: [nonce, purpose, installation_id, product_id, platform, client_version, iat]
+      properties:
+        nonce:
+          $ref: '#/components/schemas/Nonce'
+        purpose:
+          type: string
+          enum: [activate, refresh]
+        device_id:
+          $ref: '#/components/schemas/OpaqueId'
+          description: Required when `purpose` is `refresh`, absent otherwise.
+        installation_id:
+          $ref: '#/components/schemas/InstallationId'
+        product_id:
+          $ref: '#/components/schemas/ProductId'
+        platform:
+          $ref: '#/components/schemas/Platform'
+        client_version:
+          $ref: '#/components/schemas/ClientVersion'
+        iat:
+          type: integer
+          description: Client clock, informational only; the server MUST NOT reject a proof because of it.
+    LeaseClaims:
+      type: object
+      description: Payload of a lease (`lease.md` §4).
+      required:
+        - iss
+        - aud
+        - lease_id
+        - sub
+        - org
+        - device_id
+        - installation_id
+        - cnf
+        - product
+        - features
+        - entitlement_ids
+        - nbf
+        - iat
+        - exp
+        - nonce
+        - policy_version
+      properties:
+        iss:
+          type: string
+          format: uri
+        aud:
+          type: string
+          const: erpcons-office-desktop
+        lease_id:
+          $ref: '#/components/schemas/OpaqueId'
+        sub:
+          $ref: '#/components/schemas/OpaqueId'
+        org:
+          $ref: '#/components/schemas/OrgContext'
+        device_id:
+          $ref: '#/components/schemas/OpaqueId'
+        installation_id:
+          $ref: '#/components/schemas/InstallationId'
+        cnf:
+          type: object
+          required: [jkt]
+          properties:
+            jkt:
+              type: string
+              description: RFC 7638 SHA-256 thumbprint of the device public key, base64url (RFC 7800, RFC 9449 §6.1).
+              pattern: '^[A-Za-z0-9_-]{43}$'
+        product:
+          $ref: '#/components/schemas/ProductId'
+        features:
+          type: array
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/FeatureId'
+        entitlement_ids:
+          type: array
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/OpaqueId'
+        nbf:
+          type: integer
+        iat:
+          type: integer
+        exp:
+          type: integer
+        nonce:
+          $ref: '#/components/schemas/Nonce'
+        policy_version:
+          $ref: '#/components/schemas/PolicyVersion'
+    FeatureCatalogClaims:
+      type: object
+      description: Payload of a feature catalog (`products.md` §3).
+      required: [iss, product, catalog_version, iat, features]
+      properties:
+        iss:
+          type: string
+          format: uri
+        product:
+          $ref: '#/components/schemas/ProductId'
+        catalog_version:
+          type: integer
+          minimum: 1
+          description: Strictly increasing per product. Clients never accept a lower version than the one cached.
+        iat:
+          type: integer
+        features:
+          type: array
+          maxItems: 500
+          items:
+            type: object
+            required: [feature, tier]
+            properties:
+              feature:
+                $ref: '#/components/schemas/FeatureId'
+              tier:
+                type: string
+                enum: [free, pro]
+  examples:
+    MeOrganization:
+      summary: Signed in with an organization context
+      value:
+        user_id: usr_01JB6Z2K8Q4XN3T5V7W9Y1A2C3
+        display_name: Nguyễn Văn An
+        email: an.nguyen@example.com
+        status: active
+        org_context: org_01JB6Z3M5R7T9V1X3Z5B7D9F1H
+        memberships:
+          - org_id: org_01JB6Z3M5R7T9V1X3Z5B7D9F1H
+            name: Công ty Xây dựng Ví dụ
+            role: member
+            status: active
+          - org_id: org_01JB6Z4P7S9U1W3Y5A7C9E1G3J
+            name: Văn phòng Kiến trúc Mẫu
+            role: license_admin
+            status: active
+    MePersonal:
+      summary: Personal context, no organization
+      value:
+        user_id: usr_01JB6Z5R9T1V3X5Z7B9D1F3H5K
+        display_name: Trần Thị Bình
+        email: null
+        status: active
+        org_context: null
+        memberships: []
+    EntitlementsOrganization:
+      summary: One organization entitlement through an assigned seat
+      value:
+        product_id: vanban
+        org_context: org_01JB6Z3M5R7T9V1X3Z5B7D9F1H
+        entitlements:
+          - entitlement_id: ent_01JB7A1D3F5H7K9M1P3R5T7V9X
+            product_id: vanban
+            feature: vanban.use
+            scope: organization
+            org_id: org_01JB6Z3M5R7T9V1X3Z5B7D9F1H
+            quota: null
+            seats: 50
+            valid_from: '2026-10-01T00:00:00Z'
+            valid_to: '2027-10-01T00:00:00Z'
+            offline_allowed: true
+            offline_days: 30
+            policy_version: 2026-10-01.1
+    EntitlementsNone:
+      summary: No entitlement (the normal case while every feature is free)
+      value:
+        product_id: bangtinh
+        org_context: null
+        entitlements: []
+    FeatureCatalogVanban:
+      summary: Catalog version 1 of vanban, every feature free (payload decoded in lease.md §12)
+      value:
+        catalog: eyJhbGciOiJFZERTQSIsImtpZCI6InBpLWxlYXNlLWV4YW1wbGUtMSIsInR5cCI6InBpLWZlYXR1cmUtY2F0YWxvZytqd3QifQ.eyJpc3MiOiJodHRwczovL2lkLnBpLmludmFsaWQiLCJwcm9kdWN0IjoidmFuYmFuIiwiY2F0YWxvZ192ZXJzaW9uIjoxLCJpYXQiOjE3OTI4Mjg4MDAsImZlYXR1cmVzIjpbeyJmZWF0dXJlIjoidmFuYmFuLnZpZXciLCJ0aWVyIjoiZnJlZSJ9LHsiZmVhdHVyZSI6InZhbmJhbi5leHBvcnQiLCJ0aWVyIjoiZnJlZSJ9LHsiZmVhdHVyZSI6InZhbmJhbi51c2UiLCJ0aWVyIjoiZnJlZSJ9XX0.8KO9EMOFTwp8lnncsJmUr2os3nqQJLQexN5RS-8BfCU00lHKM7wsTYlY8mZMx_rFsHrqmwMtN5T7luGA_9iIBg
+    ChallengeRequestActivate:
+      summary: Challenge for a first activation
+      value:
+        purpose: activate
+        installation_id: 6f1c2d3e-4b5a-4c7d-8e9f-0a1b2c3d4e5f
+        product_id: vanban
+    ChallengeResponse:
+      summary: Nonce valid for 120 s
+      value:
+        nonce: RFIe5GcljuC_NMfuhA0MLgYEOTcDhpKb2aN03xTxK0A
+        expires_at: '2026-10-24T08:01:50Z'
+    ActivateRequest:
+      summary: Văn bản on Windows (proof decoded in lease.md §12)
+      value:
+        installation_id: 6f1c2d3e-4b5a-4c7d-8e9f-0a1b2c3d4e5f
+        product_id: vanban
+        platform: windows
+        client_version: 0.6.5
+        signed_challenge: eyJhbGciOiJFZERTQSIsInR5cCI6InBpLWRldmljZS1wcm9vZitqd3QiLCJqd2siOnsia3R5IjoiT0tQIiwiY3J2IjoiRWQyNTUxOSIsIngiOiJsNk9LNFlJUncyamNTbzJxcUxIZ3VKVmszaEstRVNpUzVPRkdYNVNBWXNBIn19.eyJub25jZSI6IlJGSWU1R2NsanVDX05NZnVoQTBNTGdZRU9UY0RocEtiMmFOMDN4VHhLMEEiLCJwdXJwb3NlIjoiYWN0aXZhdGUiLCJpbnN0YWxsYXRpb25faWQiOiI2ZjFjMmQzZS00YjVhLTRjN2QtOGU5Zi0wYTFiMmMzZDRlNWYiLCJwcm9kdWN0X2lkIjoidmFuYmFuIiwicGxhdGZvcm0iOiJ3aW5kb3dzIiwiY2xpZW50X3ZlcnNpb24iOiIwLjYuNSIsImlhdCI6MTc5MjgyODc5OH0.xmMHF-Cye5aX_-1vh-Ip9HamZwwTogdIB19m5UoA00NgYsE1tf8JChUPeB3gBep5mhF4j30Kc9kpAK_PN5tCCA
+    ActivationResponse:
+      summary: Lease for 30 days with one organization entitlement (lease decoded in lease.md §12)
+      value:
+        device_id: dev_01JB7A0C2E4G6J8L0N2Q4S6U8W
+        entitlement_ids: [ent_01JB7A1D3F5H7K9M1P3R5T7V9X]
+        rights: [vanban.use]
+        offline_valid_until: '2026-11-23T08:00:00Z'
+        policy_version: 2026-10-01.1
+        lease: eyJhbGciOiJFZERTQSIsImtpZCI6InBpLWxlYXNlLWV4YW1wbGUtMSIsInR5cCI6InBpLWxlYXNlK2p3dCJ9.eyJpc3MiOiJodHRwczovL2lkLnBpLmludmFsaWQiLCJhdWQiOiJlcnBjb25zLW9mZmljZS1kZXNrdG9wIiwibGVhc2VfaWQiOiJsc2VfMDFKQjdBMkY0SDZLOE0wUDJSNFQ2VjhYMFoiLCJzdWIiOiJ1c3JfMDFKQjZaMks4UTRYTjNUNVY3VzlZMUEyQzMiLCJvcmciOiJvcmdfMDFKQjZaM001UjdUOVYxWDNaNUI3RDlGMUgiLCJkZXZpY2VfaWQiOiJkZXZfMDFKQjdBMEMyRTRHNko4TDBOMlE0UzZVOFciLCJpbnN0YWxsYXRpb25faWQiOiI2ZjFjMmQzZS00YjVhLTRjN2QtOGU5Zi0wYTFiMmMzZDRlNWYiLCJjbmYiOnsiamt0IjoibjVxU3hrSTl3WlcteG9LUU1qanBkbWt0WVRjTG1keUJfbEc5WGFRaHFMTSJ9LCJwcm9kdWN0IjoidmFuYmFuIiwiZmVhdHVyZXMiOlsidmFuYmFuLnVzZSJdLCJlbnRpdGxlbWVudF9pZHMiOlsiZW50XzAxSkI3QTFEM0Y1SDdLOU0xUDNSNVQ3VjlYIl0sIm5iZiI6MTc5MjgyODgwMCwiaWF0IjoxNzkyODI4ODAwLCJleHAiOjE3OTU0MjA4MDAsIm5vbmNlIjoiUkZJZTVHY2xqdUNfTk1mdWhBME1MZ1lFT1RjRGhwS2IyYU4wM3hUeEswQSIsInBvbGljeV92ZXJzaW9uIjoiMjAyNi0xMC0wMS4xIn0.9ErzrUmc2F-ASSgptBdMZXb1cBNDNKvfx1EkVAxGlStKg8wjASj7yZXzCf8yPcHJiaPB05YH7ce3TTBxg4qiAQ
+    RefreshRequest:
+      summary: Refresh of the device activated above (proof payload has purpose refresh and device_id)
+      value:
+        device_id: dev_01JB7A0C2E4G6J8L0N2Q4S6U8W
+        installation_id: 6f1c2d3e-4b5a-4c7d-8e9f-0a1b2c3d4e5f
+        product_id: vanban
+        platform: windows
+        client_version: 0.6.5
+        signed_challenge: eyJhbGciOiJFZERTQSIsInR5cCI6InBpLWRldmljZS1wcm9vZitqd3QiLCJqd2siOnsia3R5IjoiT0tQIiwiY3J2IjoiRWQyNTUxOSIsIngiOiJsNk9LNFlJUncyamNTbzJxcUxIZ3VKVmszaEstRVNpUzVPRkdYNVNBWXNBIn19.eyJub25jZSI6IjY5a0JOT3pFb3hENmF0dDFvbUtFZVJrSE5CZ3M5dVZYWVNxVk5fYnFnX0UiLCJwdXJwb3NlIjoicmVmcmVzaCIsImRldmljZV9pZCI6ImRldl8wMUpCN0EwQzJFNEc2SjhMME4yUTRTNlU4VyIsImluc3RhbGxhdGlvbl9pZCI6IjZmMWMyZDNlLTRiNWEtNGM3ZC04ZTlmLTBhMWIyYzNkNGU1ZiIsInByb2R1Y3RfaWQiOiJ2YW5iYW4iLCJwbGF0Zm9ybSI6IndpbmRvd3MiLCJjbGllbnRfdmVyc2lvbiI6IjAuNi41IiwiaWF0IjoxNzkyOTE1MTk4fQ.O6I8mHOcSFMtnxmQSuzARuBYdcj03B2z8hkbx8AXmb8ncSE-Bx7W5AKf_WmgOq6SiJcaBkRIAZzoKDhQPNCECw
+    RefreshActive:
+      summary: Lease renewed
+      value:
+        status: active
+        device_id: dev_01JB7A0C2E4G6J8L0N2Q4S6U8W
+        entitlement_ids: [ent_01JB7A1D3F5H7K9M1P3R5T7V9X]
+        rights: [vanban.use]
+        offline_valid_until: '2026-11-24T08:00:00Z'
+        policy_version: 2026-10-01.1
+        lease: eyJhbGciOiJFZERTQSIsImtpZCI6InBpLWxlYXNlLWV4YW1wbGUtMSIsInR5cCI6InBpLWxlYXNlK2p3dCJ9.eyJpc3MiOiJodHRwczovL2lkLnBpLmludmFsaWQiLCJhdWQiOiJlcnBjb25zLW9mZmljZS1kZXNrdG9wIiwibGVhc2VfaWQiOiJsc2VfMDFKQjlDNEg2SzhNMFAyUjRUNlY4WDBaMkIiLCJzdWIiOiJ1c3JfMDFKQjZaMks4UTRYTjNUNVY3VzlZMUEyQzMiLCJvcmciOiJvcmdfMDFKQjZaM001UjdUOVYxWDNaNUI3RDlGMUgiLCJkZXZpY2VfaWQiOiJkZXZfMDFKQjdBMEMyRTRHNko4TDBOMlE0UzZVOFciLCJpbnN0YWxsYXRpb25faWQiOiI2ZjFjMmQzZS00YjVhLTRjN2QtOGU5Zi0wYTFiMmMzZDRlNWYiLCJjbmYiOnsiamt0IjoibjVxU3hrSTl3WlcteG9LUU1qanBkbWt0WVRjTG1keUJfbEc5WGFRaHFMTSJ9LCJwcm9kdWN0IjoidmFuYmFuIiwiZmVhdHVyZXMiOlsidmFuYmFuLnVzZSJdLCJlbnRpdGxlbWVudF9pZHMiOlsiZW50XzAxSkI3QTFEM0Y1SDdLOU0xUDNSNVQ3VjlYIl0sIm5iZiI6MTc5MjkxNTIwMCwiaWF0IjoxNzkyOTE1MjAwLCJleHAiOjE3OTU1MDcyMDAsIm5vbmNlIjoiNjlrQk5PekVveEQ2YXR0MW9tS0VlUmtITkJnczl1VlhZU3FWTl9icWdfRSIsInBvbGljeV92ZXJzaW9uIjoiMjAyNi0xMC0wMS4xIn0.31UoZBsxzLXSTj-K4SjrT6uKyaEKGRiSiLwzY3wT7tsdqU04WTSrrdRXmzBiKhL0MB0fOMUDqizX1Xah1OUcCA
+    RefreshRevoked:
+      summary: Device revoked by an organization admin
+      value:
+        status: revoked
+        device_id: dev_01JB7A0C2E4G6J8L0N2Q4S6U8W
+        reason: device_revoked
+        revoked_at: '2026-11-02T03:15:00Z'
+    ProblemInvalidRequest:
+      value:
+        type: https://id.pi.invalid/problems/invalid_request
+        title: Invalid request
+        status: 400
+        detail: Query parameter product_id is required.
+        code: invalid_request
+        correlation_id: 3c9a1e52-7f04-4d6b-8a2e-1b5c9d0f7e64
+    ProblemUnauthenticated:
+      value:
+        type: https://id.pi.invalid/problems/unauthenticated
+        title: Authentication required
+        status: 401
+        code: unauthenticated
+        correlation_id: 3c9a1e52-7f04-4d6b-8a2e-1b5c9d0f7e64
+    ProblemMembershipInactive:
+      value:
+        type: https://id.pi.invalid/problems/membership_inactive
+        title: Membership is not active
+        status: 403
+        code: membership_inactive
+        correlation_id: 3c9a1e52-7f04-4d6b-8a2e-1b5c9d0f7e64
+    ProblemDeviceRevoked:
+      value:
+        type: https://id.pi.invalid/problems/device_revoked
+        title: Device revoked
+        status: 403
+        code: device_revoked
+        correlation_id: 3c9a1e52-7f04-4d6b-8a2e-1b5c9d0f7e64
+    ProblemDeviceUnknown:
+      value:
+        type: https://id.pi.invalid/problems/device_unknown
+        title: Unknown device
+        status: 403
+        code: device_unknown
+        correlation_id: 3c9a1e52-7f04-4d6b-8a2e-1b5c9d0f7e64
+    ProblemDeviceCap:
+      value:
+        type: https://id.pi.invalid/problems/device_cap_reached
+        title: Device limit reached
+        status: 409
+        detail: Remove a device in PI ID to activate this one.
+        code: device_cap_reached
+        correlation_id: 3c9a1e52-7f04-4d6b-8a2e-1b5c9d0f7e64
+        max_devices: 3
+        active_devices: 3
+    ProblemInstallationKeyMismatch:
+      value:
+        type: https://id.pi.invalid/problems/installation_key_mismatch
+        title: Installation registered with another key
+        status: 409
+        code: installation_key_mismatch
+        correlation_id: 3c9a1e52-7f04-4d6b-8a2e-1b5c9d0f7e64
+    ProblemIdempotencyInProgress:
+      value:
+        type: https://id.pi.invalid/problems/idempotency_in_progress
+        title: Request with this Idempotency-Key is still running
+        status: 409
+        code: idempotency_in_progress
+        correlation_id: 3c9a1e52-7f04-4d6b-8a2e-1b5c9d0f7e64
+    ProblemClientVersion:
+      value:
+        type: https://id.pi.invalid/problems/client_version_unsupported
+        title: Client version not supported
+        status: 412
+        detail: vanban 0.6.5 is below the minimum 0.7.0.
+        code: client_version_unsupported
+        correlation_id: 3c9a1e52-7f04-4d6b-8a2e-1b5c9d0f7e64
+    ProblemValidation:
+      value:
+        type: https://id.pi.invalid/problems/validation_failed
+        title: Validation failed
+        status: 422
+        code: validation_failed
+        correlation_id: 3c9a1e52-7f04-4d6b-8a2e-1b5c9d0f7e64
+        errors:
+          - pointer: /platform
+            code: enum
+            detail: Must be windows, macos or linux.
+    ProblemChallengeInvalid:
+      value:
+        type: https://id.pi.invalid/problems/challenge_invalid
+        title: Challenge invalid
+        status: 422
+        detail: Nonce expired.
+        code: challenge_invalid
+        correlation_id: 3c9a1e52-7f04-4d6b-8a2e-1b5c9d0f7e64
+    ProblemRateLimited:
+      value:
+        type: https://id.pi.invalid/problems/rate_limited
+        title: Too many requests
+        status: 429
+        code: rate_limited
+        correlation_id: 3c9a1e52-7f04-4d6b-8a2e-1b5c9d0f7e64
+    ProblemDependency:
+      value:
+        type: https://id.pi.invalid/problems/dependency_unavailable
+        title: Service temporarily unavailable
+        status: 503
+        code: dependency_unavailable
+        correlation_id: 3c9a1e52-7f04-4d6b-8a2e-1b5c9d0f7e64
