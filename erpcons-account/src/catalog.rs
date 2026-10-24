@@ -1,0 +1,146 @@
+//! Feature ids, tiers and the signed feature catalog (products.md §2, §3).
+use std::collections::HashMap;
+
+use serde_json::Value;
+
+use crate::{PinnedKey, Product, VerifyError, jose};
+
+pub(crate) const CATALOG_TYP: &str = "pi-feature-catalog+jwt";
+
+/// Feature tier: `pro` needs an entitlement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tier {
+    Free,
+    Pro,
+}
+
+/// Entry of the built-in catalog (version 0) compiled into a release.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuiltinFeature {
+    pub feature: String,
+    pub tier: Tier,
+}
+
+impl BuiltinFeature {
+    pub fn new(feature: impl Into<String>, tier: Tier) -> Self {
+        Self {
+            feature: feature.into(),
+            tier,
+        }
+    }
+
+    /// `<product>.view`, `.export` and `.use`, all free (products.md §2).
+    pub fn defaults(product: Product) -> Vec<Self> {
+        ["view", "export", "use"]
+            .into_iter()
+            .map(|name| Self::new(format!("{}.{name}", product.id()), Tier::Free))
+            .collect()
+    }
+}
+
+/// `<product_id>.<name>` as products.md §2 defines it.
+pub fn is_valid_feature_id(feature: &str) -> bool {
+    let Some((product, name)) = feature.split_once('.') else {
+        return false;
+    };
+    feature.len() <= 64
+        && Product::from_id(product).is_some()
+        && name.split('.').all(|seg| {
+            !seg.is_empty()
+                && seg
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        })
+}
+
+/// `<product>.view` and `<product>.export` are free whatever a catalog says (HS02).
+pub fn is_pinned_free(feature: &str) -> bool {
+    is_valid_feature_id(feature) && matches!(feature.split_once('.'), Some((_, "view" | "export")))
+}
+
+pub(crate) fn belongs_to(feature: &str, product: Product) -> bool {
+    is_valid_feature_id(feature)
+        && feature
+            .split_once('.')
+            .is_some_and(|(p, _)| p == product.id())
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Catalog {
+    pub version: u64,
+    pub tiers: HashMap<String, Tier>,
+    pub jws: String,
+}
+
+/// Accepts a catalog per products.md §3; `cached` is the version already held.
+pub(crate) fn verify(
+    jws: &str,
+    keys: &[PinnedKey],
+    issuer: &str,
+    product: Product,
+    cached: u64,
+) -> Result<Catalog, VerifyError> {
+    let payload = jose::verify_platform(jws, CATALOG_TYP, keys)?;
+    let version = payload
+        .get("catalog_version")
+        .and_then(Value::as_u64)
+        .filter(|v| *v >= 1)
+        .ok_or(VerifyError::Claims)?;
+    payload
+        .get("iat")
+        .and_then(Value::as_i64)
+        .ok_or(VerifyError::Claims)?;
+    let features = payload
+        .get("features")
+        .and_then(Value::as_array)
+        .filter(|f| f.len() <= 500)
+        .ok_or(VerifyError::Claims)?;
+    if payload.get("iss").and_then(Value::as_str) != Some(issuer) {
+        return Err(VerifyError::Issuer);
+    }
+    if payload.get("product").and_then(Value::as_str) != Some(product.id()) {
+        return Err(VerifyError::Product);
+    }
+    let mut tiers = HashMap::new();
+    for entry in features {
+        let feature = entry
+            .get("feature")
+            .and_then(Value::as_str)
+            .ok_or(VerifyError::Claims)?;
+        let tier = match entry.get("tier").and_then(Value::as_str) {
+            Some("free") => Tier::Free,
+            Some("pro") => Tier::Pro,
+            _ => return Err(VerifyError::Claims),
+        };
+        if !is_valid_feature_id(feature) {
+            return Err(VerifyError::Feature);
+        }
+        if tier == Tier::Pro && is_pinned_free(feature) {
+            log::warn!("feature catalog marks pinned-free {feature} as pro; ignored");
+        }
+        if tiers.insert(feature.to_owned(), tier).is_some() {
+            return Err(VerifyError::Claims);
+        }
+    }
+    if version < cached {
+        return Err(VerifyError::Downgrade);
+    }
+    Ok(Catalog {
+        version,
+        tiers,
+        jws: jws.to_owned(),
+    })
+}
+
+/// `tier(f)` of products.md §3; `None` for a feature this release does not gate.
+pub(crate) fn tier(builtin: &[BuiltinFeature], catalog: Option<&Catalog>, f: &str) -> Option<Tier> {
+    let entry = builtin.iter().find(|b| b.feature == f)?;
+    if is_pinned_free(f) {
+        return Some(Tier::Free);
+    }
+    Some(
+        catalog
+            .and_then(|c| c.tiers.get(f).copied())
+            .unwrap_or(entry.tier),
+    )
+}
