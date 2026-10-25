@@ -46,7 +46,7 @@ when it is unavailable the session lives in memory only and `Status` reports `se
 Release builds pin `PLATFORM_KEYS` in `src/config.rs`; it is empty until PI publishes its
 signing keys. Tests and E2E runs set `Config::platform_keys` to the mock's key.
 
-Building on Linux needs `libdbus-1-dev` (Secret Service backend of `keyring`).
+On Linux the credential store is the Secret Service, reached through zbus (pure Rust): builds need no libdbus.
 
 ## pi-mock
 
