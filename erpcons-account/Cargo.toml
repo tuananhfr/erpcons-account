@@ -11,7 +11,8 @@ publish.workspace = true
 base64.workspace = true
 ed25519-dalek.workspace = true
 getrandom.workspace = true
-keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+# Secret Service over zbus (pure Rust): Linux builds need no libdbus.
+keyring = { version = "3.6", features = ["apple-native", "windows-native", "async-secret-service", "async-io", "crypto-rust"] }
 log = "0.4"
 rustls-native-certs = "0.8"
 serde.workspace = true
