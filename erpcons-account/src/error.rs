@@ -1,6 +1,6 @@
 use std::{fmt, time::Duration};
 
-/// Stable problem `code` of the contract error table (contract §3).
+/// Error kind of a failed API call: PI's `code` (ADR 0011) or the contract error table (§3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ApiCode {
     InvalidRequest,
@@ -27,9 +27,19 @@ pub enum ApiCode {
 }
 
 impl ApiCode {
-    /// Known code for its status; an unknown code falls back to its HTTP status (contract §2).
+    /// Known code for its status; an unknown or absent code falls back to its HTTP status.
+    ///
+    /// PI's error envelope `{ok:false, message, code?}` carries UPPERCASE codes (ADR 0011); the
+    /// lowercase ones are the Office contract's, still used by the licensing endpoints of pi-mock.
     pub fn from_parts(status: u16, code: Option<&str>) -> Self {
         let known = match (status, code.unwrap_or("")) {
+            (403, "INSUFFICIENT_SCOPE") => Some(Self::InsufficientScope),
+            (403, "MEMBERSHIP_INACTIVE") => Some(Self::MembershipInactive),
+            (403, "ACCOUNT_LOCKED") => Some(Self::UserSuspended),
+            (409, "DEVICE_CAP") => Some(Self::DeviceCapReached),
+            (409, "DEVICE_REVOKED") => Some(Self::DeviceRevoked),
+            (409, "CHALLENGE_INVALID") => Some(Self::ChallengeInvalid),
+            (409, "IDEMPOTENCY_MISMATCH") => Some(Self::IdempotencyKeyReused),
             (400, "invalid_request") => Some(Self::InvalidRequest),
             (400, "idempotency_key_missing") => Some(Self::IdempotencyKeyMissing),
             (401, "unauthenticated") => Some(Self::Unauthenticated),
@@ -58,13 +68,14 @@ impl ApiCode {
             412 => Self::ClientVersionUnsupported,
             422 => Self::ValidationFailed,
             429 => Self::RateLimited,
-            503 => Self::DependencyUnavailable,
+            // PI answers unexpected failures with a bare 500 and has no 503 code: transient.
+            500 | 502..=504 => Self::DependencyUnavailable,
             _ => Self::Other(code.unwrap_or_default().into()),
         })
     }
 }
 
-/// RFC 9457 problem returned by the platform.
+/// Failed API call: PI's error envelope, or an RFC 9457 problem of the Office contract.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApiError {
     pub status: u16,
@@ -153,7 +164,8 @@ pub enum Error {
     CredentialStore(String),
     /// `select_org` with an org that is not an active membership.
     UnknownOrg,
-    /// The platform refused the organization context; the previous context is kept.
+    /// PI did not grant the requested organization context; the session holds the context PI
+    /// did grant (`SignedIn::active_org`).
     OrgUnavailable,
     Config(String),
     Storage(String),

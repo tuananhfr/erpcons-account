@@ -1,6 +1,8 @@
 # ADR 0004: Who activates a device
 
-Status: Accepted (owner decisions)
+Status: Accepted (owner decisions). Suspended in part by ADR 0011: signed-in desktop apps do not
+activate while `Config::offline_licensing` is off (the default), because PI cannot yet issue Office
+leases that pass `lease.md` §9.
 
 ## Context
 

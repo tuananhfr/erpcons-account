@@ -48,11 +48,20 @@ pub struct Env {
     pub dir: tempfile::TempDir,
     pub store: Arc<MemorySecretStore>,
     pub clock: Arc<TestClock>,
+    /// `Config::offline_licensing` of every account this environment makes.
+    pub licensing: bool,
 }
 
 impl Env {
     pub fn new(scenario: Scenario) -> Self {
         Self::with_store(scenario, MemorySecretStore::new())
+    }
+
+    /// With the Office contract's offline licensing turned on (pi-mock's `/v1/` endpoints).
+    pub fn licensing(scenario: Scenario) -> Self {
+        let mut env = Self::new(scenario);
+        env.licensing = true;
+        env
     }
 
     pub fn with_store(mut scenario: Scenario, store: MemorySecretStore) -> Self {
@@ -65,6 +74,7 @@ impl Env {
                 unix: AtomicI64::new(T0),
                 mono_ms: AtomicU64::new(1_000_000),
             }),
+            licensing: false,
         }
     }
 
@@ -74,6 +84,7 @@ impl Env {
             kid: self.server.lease_key_id(),
             key: self.server.lease_public_key(),
         }];
+        c.offline_licensing = self.licensing;
         c.state_dir = Some(self.dir.path().to_path_buf());
         c.clock = self.clock.clone();
         c.timeout = Duration::from_secs(2);
@@ -115,6 +126,16 @@ impl Env {
             .iter()
             .filter(|r| r.method == method && r.path == path)
             .count()
+    }
+
+    /// Query strings of the authorization requests so far, oldest first.
+    pub fn authorize_queries(&self) -> Vec<String> {
+        self.server
+            .requests()
+            .into_iter()
+            .filter(|r| r.path == "/id/authorize")
+            .map(|r| r.query)
+            .collect()
     }
 }
 

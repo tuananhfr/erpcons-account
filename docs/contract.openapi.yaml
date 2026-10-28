@@ -7,6 +7,16 @@ info:
     name: MIT OR Apache-2.0
     identifier: MIT OR Apache-2.0
   description: |
+    > **Superseded in part by [ADR 0011](adr/0011-real-pi-platform.md) (real PI Platform).** PI does
+    > not implement this contract as written. Office now uses PI's own OIDC endpoints (`/id/*`, from
+    > discovery), `GET /api/v1/id/me` with PI's envelope `{ok, ...}` / `{ok:false, message, code?}`
+    > and UPPERCASE codes, and `org_hint` on the authorization request instead of `org_context`
+    > (no organization switch on the refresh grant). Entitlements and the feature catalog are not
+    > called, and the device and lease operations below run only with
+    > `Config::offline_licensing` on, which is off by default. Operations marked `x-superseded-by`
+    > are not PI's: `getMe` is replaced by `GET /api/v1/id/me`; the others stay the specification
+    > of that disabled code and of pi-mock's `/v1/` endpoints. The text below is left as written.
+
     Consumer contract of ERPCons Office (products `vanban`, `bangtinh`, `trinhchieu`, `pdf`; native
     desktop apps and wasm web apps on `https://office.erpcons.ai`). It lists only what Office calls.
     The PI Platform team owns the implementation; Office builds against a mock of this document.
@@ -170,6 +180,7 @@ paths:
   /v1/me:
     get:
       operationId: getMe
+      x-superseded-by: adr/0011-real-pi-platform.md
       tags: [identity]
       summary: Current user, organization context and memberships
       description: |
@@ -209,6 +220,7 @@ paths:
   /v1/me/entitlements:
     get:
       operationId: listMyEntitlements
+      x-superseded-by: adr/0011-real-pi-platform.md
       tags: [entitlements]
       summary: Entitlements of the current user for one product
       description: |
@@ -257,6 +269,7 @@ paths:
   /v1/products/{product_id}/feature-catalog:
     get:
       operationId: getFeatureCatalog
+      x-superseded-by: adr/0011-real-pi-platform.md
       tags: [entitlements]
       summary: Signed feature catalog of a product (public)
       description: |
@@ -292,6 +305,7 @@ paths:
   /v1/devices/challenges:
     post:
       operationId: createDeviceChallenge
+      x-superseded-by: adr/0011-real-pi-platform.md
       tags: [devices]
       summary: Get a single-use nonce for a device proof
       description: |
@@ -344,6 +358,7 @@ paths:
   /v1/devices/activate:
     post:
       operationId: activateDevice
+      x-superseded-by: adr/0011-real-pi-platform.md
       tags: [devices]
       summary: Activate this installation for a product and get a lease
       description: |
@@ -420,6 +435,7 @@ paths:
   /v1/licenses/refresh:
     post:
       operationId: refreshLease
+      x-superseded-by: adr/0011-real-pi-platform.md
       tags: [devices]
       summary: Renew the lease of an active device, or learn that it was revoked
       description: |

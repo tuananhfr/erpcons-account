@@ -1,16 +1,18 @@
-//! Challenges, activation and lease refresh with the server checks of the contract
-//! (`activateDevice`, `refreshLease`) and lease.md §5.
+//! Office-contract device protocol, not PI's: challenges, activation and lease refresh with the
+//! server checks of the contract (`activateDevice`, `refreshLease`) and lease.md §5.
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
 
-use super::{Ctx, api::effective};
+use super::{
+    Ctx,
+    contract::{PRODUCTS, effective},
+};
 use crate::{
     LeaseTamper, crypto,
     http::{Req, Resp},
-    state::{AccessRecord, DeviceRecord, NonceRecord, State},
+    state::{Auth, DeviceRecord, NonceRecord, State},
 };
 
-const PRODUCTS: [&str; 4] = ["vanban", "bangtinh", "trinhchieu", "pdf"];
 const DAY: i64 = 86_400;
 
 fn field(body: &Value, k: &str) -> Option<String> {
@@ -23,7 +25,7 @@ fn version(v: &str) -> Option<(u64, u64, u64)> {
     p.next().is_none().then_some(r)
 }
 
-pub(super) fn challenge(st: &mut State, ctx: &Ctx, req: &Req, auth: &AccessRecord) -> Resp {
+pub(super) fn challenge(st: &mut State, ctx: &Ctx, req: &Req, auth: &Auth) -> Resp {
     let body = req.json().unwrap_or(Value::Null);
     let (Some(purpose), Some(installation_id), Some(product)) = (
         field(&body, "purpose"),
@@ -82,7 +84,7 @@ fn parse(req: &Req, refresh: bool) -> Option<Request> {
 /// Proof checks in the contract's order; returns the key thumbprint and the nonce.
 fn check_proof(
     st: &mut State,
-    auth: &AccessRecord,
+    auth: &Auth,
     r: &Request,
     purpose: &str,
 ) -> Option<(String, String)> {
@@ -114,7 +116,7 @@ fn too_old(st: &State, r: &Request) -> bool {
         .is_some_and(|min| version(&r.client_version).is_some_and(|v| v < min))
 }
 
-pub(super) fn activate(st: &mut State, ctx: &Ctx, req: &Req, auth: &AccessRecord) -> Resp {
+pub(super) fn activate(st: &mut State, ctx: &Ctx, req: &Req, auth: &Auth) -> Resp {
     let Some(r) = parse(req, false) else {
         return ctx.problem(422, "validation_failed");
     };
@@ -171,7 +173,7 @@ pub(super) fn activate(st: &mut State, ctx: &Ctx, req: &Req, auth: &AccessRecord
     Resp::json(200, &lease_response(st, ctx, &device, &r.product, &nonce))
 }
 
-pub(super) fn refresh(st: &mut State, ctx: &Ctx, req: &Req, auth: &AccessRecord) -> Resp {
+pub(super) fn refresh(st: &mut State, ctx: &Ctx, req: &Req, auth: &Auth) -> Resp {
     let Some(r) = parse(req, true) else {
         return ctx.problem(422, "validation_failed");
     };
@@ -201,7 +203,7 @@ pub(super) fn refresh(st: &mut State, ctx: &Ctx, req: &Req, auth: &AccessRecord)
     } else if auth
         .org
         .as_ref()
-        .is_some_and(|o| st.membership_status(&auth.user_id, o).as_deref() != Some("active"))
+        .is_some_and(|o| !st.membership_active(&auth.user_id, o))
     {
         Some("membership_revoked")
     } else {

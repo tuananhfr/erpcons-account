@@ -491,3 +491,67 @@ fn uuid_v4_format() {
     );
     assert!(matches!(b[19], b'8' | b'9' | b'a' | b'b'));
 }
+
+#[test]
+fn pi_error_codes_map_to_api_codes() {
+    for (status, code, want) in [
+        (403, "ACCOUNT_LOCKED", ApiCode::UserSuspended),
+        (403, "INSUFFICIENT_SCOPE", ApiCode::InsufficientScope),
+        (403, "MEMBERSHIP_INACTIVE", ApiCode::MembershipInactive),
+        (409, "DEVICE_CAP", ApiCode::DeviceCapReached),
+        (409, "DEVICE_REVOKED", ApiCode::DeviceRevoked),
+        (409, "CHALLENGE_INVALID", ApiCode::ChallengeInvalid),
+        (409, "IDEMPOTENCY_MISMATCH", ApiCode::IdempotencyKeyReused),
+    ] {
+        assert_eq!(ApiCode::from_parts(status, Some(code)), want, "{code}");
+    }
+    // PI's bare statuses: 401 without a code, unexpected failures as 500.
+    assert_eq!(ApiCode::from_parts(401, None), ApiCode::Unauthenticated);
+    assert_eq!(
+        ApiCode::from_parts(500, None),
+        ApiCode::DependencyUnavailable
+    );
+    assert_eq!(ApiCode::from_parts(429, None), ApiCode::RateLimited);
+}
+
+#[test]
+fn pi_me_maps_to_identity() {
+    let body = json!({
+        "ok": true,
+        "user": {"id": "6f3b1c2a-9d4e-4f8a-b1c7-2e5d8a9f0b13", "email": "", "displayName": "An", "status": "ACTIVE"},
+        "organizations": [
+            {"id": "0c9e7a51-3b2d-4c6f-8e1a-5d7b9f2c4e60", "name": "A", "myRole": "member", "myStatus": "ACTIVE"},
+            {"id": "a4d2f6b8-1e3c-4a5b-9c7d-8e0f2a4b6c81", "name": "B", "myRole": "auditor", "myStatus": "SUSPENDED"},
+            {"id": "c0ffee00-1e3c-4a5b-9c7d-8e0f2a4b6c81", "name": "C", "myRole": "member", "myStatus": "REVOKED"}
+        ],
+        "orgContext": "0c9e7a51-3b2d-4c6f-8e1a-5d7b9f2c4e60",
+        "scopes": ["openid"],
+        "meta": {}
+    });
+    let me = crate::me::parse(body.to_string().as_bytes()).unwrap();
+    assert_eq!(me.user_id, "6f3b1c2a-9d4e-4f8a-b1c7-2e5d8a9f0b13");
+    assert_eq!(me.email, None);
+    assert!(!me.locked);
+    assert_eq!(
+        me.org_context.as_deref(),
+        Some("0c9e7a51-3b2d-4c6f-8e1a-5d7b9f2c4e60")
+    );
+    let statuses: Vec<_> = me.memberships.iter().map(|m| m.status).collect();
+    assert_eq!(
+        statuses,
+        [
+            crate::MembershipStatus::Active,
+            crate::MembershipStatus::Suspended
+        ]
+    );
+    assert_eq!(me.memberships[1].role, "auditor");
+
+    let locked = json!({"ok": true, "user": {"id": "x", "status": "LOCKED"}, "orgContext": null});
+    assert!(
+        crate::me::parse(locked.to_string().as_bytes())
+            .unwrap()
+            .locked
+    );
+    let failed = json!({"ok": false, "message": "Lỗi hệ thống."});
+    assert!(crate::me::parse(failed.to_string().as_bytes()).is_err());
+}

@@ -57,6 +57,8 @@ struct Ops {
     device: Option<Device>,
     lock_held: bool,
     catalog_fetched: Option<Duration>,
+    /// `prompt=login` due after a sign-out that `session.json` could not record.
+    login_prompt: bool,
 }
 
 struct Access {
@@ -182,6 +184,8 @@ impl Account {
             Some((list, at)) if self.mono().saturating_sub(*at) <= ENTITLEMENTS_FRESH => {
                 list.iter().any(|e| e.feature == feature)
             }
+            // Without licensing no refresh can grant a `pro` feature; asking for one would loop.
+            _ if !self.cfg.offline_licensing => false,
             _ => {
                 self.refresh_wanted.store(true, Ordering::SeqCst);
                 false
@@ -201,12 +205,14 @@ impl Account {
         self.persist_floor(&mut ops, false)
     }
 
-    /// Start-up and periodic sync: catalog, tokens, identity, entitlements, activation or lease
-    /// refresh. Free features never depend on its outcome.
+    /// Start-up and periodic sync: tokens and identity, plus catalog, entitlements and lease when
+    /// [`Config::offline_licensing`] is on. Free features never depend on its outcome.
     pub fn refresh(&self) -> Result<(), Error> {
         let mut ops = lock(&self.ops);
         self.reload_with(&mut ops)?;
-        if let Err(e) = self.sync_catalog(&mut ops) {
+        if self.cfg.offline_licensing
+            && let Err(e) = self.sync_catalog(&mut ops)
+        {
             log::warn!("feature catalog not updated: {e}");
         }
         let result = self.sync_signed_in(&mut ops);
@@ -214,48 +220,20 @@ impl Account {
         result
     }
 
-    /// Switches the shared session to `org_id`, or to the personal context with `None` (ADR 0008).
-    pub fn select_org(&self, org_id: Option<&str>) -> Result<(), Error> {
-        let mut ops = lock(&self.ops);
-        self.reload_with(&mut ops)?;
-        let view = self.view();
-        if !view.signed_in {
-            return Err(Error::NotSignedIn);
-        }
-        if let Some(id) = org_id {
-            let member = view.session.profile.as_ref().is_some_and(|p| {
-                p.memberships
-                    .iter()
-                    .any(|m| m.org_id == id && m.status == crate::MembershipStatus::Active)
-            });
-            if !member {
-                return Err(Error::UnknownOrg);
-            }
-        }
-        drop(view);
-        match self.rotate(&mut ops, Some(org_id.unwrap_or("personal")), false) {
-            Err(Error::InvalidGrant) => {
-                // invalid_grant on a switch means a refused membership or a dead token; a plain
-                // refresh tells them apart and signs out only in the second case.
-                self.rotate(&mut ops, None, true)?;
-                return Err(Error::OrgUnavailable);
-            }
-            other => other?,
-        }
-        self.fetch_me(&mut ops)?;
-        self.fetch_entitlements(&mut ops)?;
-        self.sync_licence(&mut ops)
-    }
-
     /// Signs out all four apps: revokes the refresh token, wipes session secrets and leases.
     /// The device key, `installation_id` and `trusted_floor` stay; documents are never touched.
+    /// The next sign-in asks PI for `prompt=login`, since PI's browser session outlives this.
     pub fn sign_out(&self) -> Result<(), Error> {
         let mut ops = lock(&self.ops);
         self.wipe(&mut ops, true)
     }
 
     /// Clears a `device_cap_reached` block and activates again (user action, lease.md §6).
+    /// Does nothing while [`Config::offline_licensing`] is off.
     pub fn retry_activation(&self) -> Result<(), Error> {
+        if !self.cfg.offline_licensing {
+            return Ok(());
+        }
         let mut ops = lock(&self.ops);
         self.reload_with(&mut ops)?;
         self.update_session(&mut ops, |s| s.device_cap_reached = false)?;

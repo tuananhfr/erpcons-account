@@ -9,6 +9,8 @@ use crate::{
 pub const DESKTOP_CLIENT_ID: &str = "erpcons-office-desktop";
 /// Scopes requested by the desktop client (contract §1).
 pub const DESKTOP_SCOPES: &str = "openid profile email offline_access pi.entitlements pi.devices";
+/// Path of PI's end-user API on the issuer's host (ADR 0011).
+pub const PI_API_PATH: &str = "/api/v1/id";
 /// Platform licence-signing keys pinned in release builds, as `(kid, Ed25519 public key)`.
 ///
 /// Empty until the PI Platform issues its keys (lease.md §10). Development keys, such as the
@@ -101,7 +103,7 @@ pub struct PinnedKey {
 pub struct Config {
     /// OIDC issuer; discovery must return exactly this value. Also the lease and catalog `iss`.
     pub issuer: String,
-    /// Base URL of the `/v1` API. `None` uses the issuer.
+    /// Base URL of PI's end-user API (`/me` below it). `None`: `{issuer}/api/v1/id` (ADR 0011).
     pub api_base: Option<String>,
     pub client_id: String,
     pub product: Product,
@@ -121,7 +123,11 @@ pub struct Config {
     pub timeout: Duration,
     /// Longest wait a call spends on its own retries before returning the error.
     pub max_retry_wait: Duration,
-    /// How long `sign_in` waits for the browser callback.
+    /// Device activation, offline leases, online entitlements and the signed feature catalog of
+    /// the Office contract (ADR 0003, 0009). PI serves none of them in that form yet, so they stay
+    /// off and none of their endpoints is called (ADR 0011).
+    pub offline_licensing: bool,
+    /// How long `sign_in` and `select_org` wait for the browser callback.
     pub sign_in_timeout: Duration,
     /// Page served to the browser after a successful callback; the app supplies the text.
     pub callback_success_html: String,
@@ -158,6 +164,7 @@ impl Config {
             state_dir: None,
             timeout: Duration::from_secs(15),
             max_retry_wait: Duration::from_secs(10),
+            offline_licensing: false,
             sign_in_timeout: Duration::from_secs(600),
             callback_success_html: "<!doctype html><meta charset=\"utf-8\"><title>ERPCons</title>"
                 .into(),
@@ -167,11 +174,17 @@ impl Config {
         }
     }
 
-    pub(crate) fn api(&self) -> &str {
-        self.api_base
-            .as_deref()
-            .unwrap_or(&self.issuer)
-            .trim_end_matches('/')
+    /// URL of a PI end-user API `path` (`/me`).
+    pub(crate) fn pi_url(&self, path: &str) -> String {
+        match &self.api_base {
+            Some(base) => format!("{}{path}", base.trim_end_matches('/')),
+            None => format!("{}{PI_API_PATH}{path}", self.issuer.trim_end_matches('/')),
+        }
+    }
+
+    /// URL of an Office-contract `path` (`/v1/...`); only pi-mock serves these (ADR 0011).
+    pub(crate) fn contract_url(&self, path: &str) -> String {
+        format!("{}{path}", self.issuer.trim_end_matches('/'))
     }
 
     pub(crate) fn validate(&self) -> Result<(), crate::Error> {

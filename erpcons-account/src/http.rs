@@ -181,9 +181,11 @@ fn retryable(r: &Reply) -> bool {
     }
 }
 
+/// PI's `{ok:false, message, code?, correlationId?}` or an RFC 9457 problem: both carry `code`.
 #[derive(Deserialize)]
 struct Problem {
     code: Option<String>,
+    #[serde(alias = "correlationId")]
     correlation_id: Option<String>,
     max_devices: Option<u64>,
     active_devices: Option<u64>,
@@ -202,7 +204,7 @@ impl Reply {
         (200..300).contains(&self.status)
     }
 
-    /// Typed error for a non-2xx reply (RFC 9457 body when present).
+    /// Typed error for a non-2xx reply.
     pub(crate) fn error(&self) -> Error {
         let p = problem(self);
         let code = ApiCode::from_parts(self.status, p.as_ref().and_then(|p| p.code.as_deref()));

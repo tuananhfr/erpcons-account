@@ -15,12 +15,12 @@ pub enum Status {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SignedIn {
-    /// `None` until `GET /v1/me` has answered once on this machine.
+    /// `None` until PI's `/me` has answered once on this machine.
     pub user: Option<User>,
     pub orgs: Vec<Membership>,
-    /// Current `org_context`; `None` is the personal context.
+    /// `orgContext` of PI's `/me`; `None` is the personal context.
     pub active_org: Option<String>,
-    /// Licence of this app's product.
+    /// Licence of this app's product; `NotActivated` while `Config::offline_licensing` is off.
     pub licence: LicenceState,
     /// Licence of each of the four products on this device.
     pub licences: BTreeMap<Product, LicenceState>,

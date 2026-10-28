@@ -20,6 +20,13 @@ fn refresh_rotates_and_stores_the_new_token() {
     let second = env.refresh_token().unwrap();
     assert_ne!(first, second);
     assert!(!env.server.refresh_family_revoked(&second));
+    // Offline licensing is off by default: no Office-contract endpoint is ever called.
+    assert!(
+        env.server
+            .requests()
+            .iter()
+            .all(|r| !r.path.starts_with("/v1/"))
+    );
 }
 
 #[test]
@@ -30,7 +37,7 @@ fn reuse_detection_signs_out() {
     let stolen = env.refresh_token().unwrap();
     env.account().refresh().unwrap();
     // The stolen, already rotated token is presented again: the platform revokes the family.
-    let reply = ureq::post(&format!("{}/token", env.server.base_url()))
+    let reply = ureq::post(&format!("{}/id/token", env.server.base_url()))
         .header("Content-Type", "application/x-www-form-urlencoded")
         .config()
         .http_status_as_error(false)
@@ -56,13 +63,13 @@ fn reuse_detection_signs_out() {
 
 #[test]
 fn two_processes_rotate_without_losing_the_session() {
-    let env = Env::new(Scenario::default());
+    let env = Env::licensing(Scenario::default());
     let a = env.account();
     sign_in(&a);
     let b = env.account_for(Product::BangTinh);
     assert!(matches!(b.status(), Status::SignedIn(_)));
     for _ in 0..3 {
-        // Access tokens expire after 1 h, so each refresh() rotates the shared refresh token.
+        // Access tokens expire after 10 min, so each refresh() rotates the shared refresh token.
         env.advance(7200);
         a.refresh().unwrap();
         b.refresh().unwrap();
@@ -89,7 +96,7 @@ fn two_processes_rotate_without_losing_the_session() {
 
 #[test]
 fn sign_out_wipes_session_but_keeps_device() {
-    let env = Env::new(Scenario::default());
+    let env = Env::licensing(Scenario::default());
     let account = env.account();
     sign_in(&account);
     let token = env.refresh_token().unwrap();
@@ -103,7 +110,7 @@ fn sign_out_wipes_session_but_keeps_device() {
     assert_eq!(env.store.get(DEVICE_ENTRY).unwrap(), device_entry);
     assert!(!env.file("lease-vanban.json").exists());
     assert!(env.server.refresh_family_revoked(&token));
-    assert_eq!(env.count("POST", "/revoke"), 1);
+    assert_eq!(env.count("POST", "/id/revoke"), 1);
     let after = env.account().diagnostics();
     assert_eq!(after.installation_id, before.installation_id);
     assert_eq!(after.device_id, None);
@@ -115,7 +122,8 @@ fn sign_out_wipes_session_but_keeps_device() {
 
 #[test]
 fn credential_store_unavailable_gives_session_only_sign_in() {
-    let env = Env::with_store(pro_scenario(None, 30), MemorySecretStore::unavailable());
+    let mut env = Env::with_store(pro_scenario(None, 30), MemorySecretStore::unavailable());
+    env.licensing = true;
     let account = env.account();
     sign_in(&account);
     let s = signed_in(account.status());
@@ -138,7 +146,7 @@ fn persistent_401_requires_reauthentication() {
     let account = env.account();
     sign_in(&account);
     env.server
-        .add_fault(Fault::problem("GET", "/v1/me", 401, "unauthenticated"));
+        .add_fault(Fault::problem("GET", "/api/v1/id/me", 401, ""));
     let err = account.refresh().unwrap_err();
     assert_eq!(err.api_code_for_test(), Some(ApiCode::Unauthenticated));
     let s = signed_in(account.status());
@@ -154,7 +162,7 @@ fn rate_limit_honours_retry_after() {
     let account = env.account();
     sign_in(&account);
     env.server.add_fault(
-        Fault::problem("GET", "/v1/me", 429, "rate_limited")
+        Fault::problem("GET", "/api/v1/id/me", 429, "")
             .retry_after(1)
             .times(1),
     );
@@ -163,7 +171,7 @@ fn rate_limit_honours_retry_after() {
     assert!(started.elapsed() >= Duration::from_secs(1));
 
     env.server.add_fault(
-        Fault::problem("GET", "/v1/me", 429, "rate_limited")
+        Fault::problem("GET", "/api/v1/id/me", 429, "")
             .retry_after(120)
             .times(1),
     );
@@ -176,7 +184,7 @@ fn rate_limit_honours_retry_after() {
 
 #[test]
 fn service_unavailable_keeps_the_lease() {
-    let env = Env::new(Scenario::default());
+    let env = Env::licensing(Scenario::default());
     let account = env.account();
     sign_in(&account);
     let before = env.count("GET", "/v1/me/entitlements");
@@ -206,7 +214,7 @@ fn service_unavailable_keeps_the_lease() {
 fn guest_allows_free_features_only() {
     let mut catalog = pro_catalog();
     catalog.features[0].1 = "pro".into();
-    let env = Env::new(Scenario {
+    let env = Env::licensing(Scenario {
         catalogs: vec![catalog],
         ..Scenario::default()
     });

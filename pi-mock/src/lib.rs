@@ -1,15 +1,20 @@
-//! Mock of the PI Platform consumer contract (`docs/contract.openapi.yaml`): OIDC with PKCE and
-//! refresh-token rotation, identity, entitlements, signed feature catalogs, device activation
-//! and leases. In-process for tests, or the `pi-mock` binary for manual and E2E runs.
+//! Mock of the real PI Platform (`pi_id`) as ERPCons Office uses it (ADR 0011): OIDC discovery,
+//! PKCE S256 authorization with `org_hint`, EdDSA access and ID tokens with `/id/jwks.json`,
+//! refresh rotation with family revocation on reuse, and `/api/v1/id/me` in PI's envelope.
+//! It also keeps the Office contract's licensing endpoints under `/v1/` (entitlements, signed
+//! feature catalogs, device activation, leases), which PI does not have, so the licensing code
+//! behind `Config::offline_licensing` stays testable. In-process for tests, or the `pi-mock`
+//! binary for manual and E2E runs.
 //!
-//! Its lease key is a fixed development key ([`dev_lease_public_key`]); release builds of the
-//! apps never pin it.
+//! Its signing and lease keys are fixed development keys ([`dev_signing_seed`],
+//! [`dev_lease_public_key`]); release builds of the apps never trust them.
 #[cfg(target_arch = "wasm32")]
 compile_error!("pi-mock is a native test server");
 
 mod crypto;
 mod handlers;
 mod http;
+mod jwt;
 mod scenario;
 mod state;
 
@@ -21,8 +26,9 @@ use std::{
 };
 
 pub use scenario::{
-    Authorize, Catalog, DEFAULT_USER, DEV_LEASE_KID, Entitlement, Fault, FaultAction, LeaseTamper,
-    Membership, ORG_A, ORG_B, Scenario, User, dev_lease_public_key, dev_lease_seed,
+    Authorize, Catalog, Client, DEFAULT_USER, DESKTOP_CLIENT, DEV_LEASE_KID, DEV_SIGNING_KID,
+    Entitlement, Fault, FaultAction, JwtKey, LeaseTamper, Membership, ORG_A, ORG_B, Scenario, User,
+    WEB_CLIENT, dev_lease_public_key, dev_lease_seed, dev_signing_seed,
 };
 pub use state::{DeviceRecord, RecordedRequest};
 
@@ -100,7 +106,7 @@ impl Server {
         &self.base_url
     }
 
-    /// OIDC issuer, also the `iss` of leases and catalogs.
+    /// OIDC issuer: `iss` of tokens, leases and catalogs.
     pub fn issuer(&self) -> &str {
         &self.shared.issuer
     }
@@ -116,6 +122,67 @@ impl Server {
         ed25519_dalek::SigningKey::from_bytes(&seed)
             .verifying_key()
             .to_bytes()
+    }
+
+    /// `kid` of the PI ID key that signs access and ID tokens.
+    pub fn signing_key_id(&self) -> String {
+        let state = self.shared.state();
+        state
+            .scenario
+            .signing_keys
+            .first()
+            .map(|k| k.kid.clone())
+            .unwrap_or_default()
+    }
+
+    /// Public half of the PI ID signing key, as `/id/jwks.json` publishes it.
+    pub fn signing_public_key(&self) -> Option<[u8; 32]> {
+        let state = self.shared.state();
+        let seed = state.scenario.signing_keys.first()?.seed;
+        Some(
+            ed25519_dalek::SigningKey::from_bytes(&seed)
+                .verifying_key()
+                .to_bytes(),
+        )
+    }
+
+    pub fn jwks_uri(&self) -> String {
+        format!("{}/id/jwks.json", self.shared.issuer)
+    }
+
+    /// Signs `claims` as PI ID does (header `{alg, typ: "JWT", kid}`), for tokens a test forges.
+    pub fn sign_jwt(&self, claims: &serde_json::Value) -> String {
+        let state = self.shared.state();
+        match state.scenario.signing_keys.first() {
+            Some(key) => jwt::sign(&claims.to_string(), "JWT", key),
+            None => String::new(),
+        }
+    }
+
+    /// A PI access token for `user` in `org`, as `/id/token` would issue it to `client_id`.
+    pub fn issue_access_token(
+        &self,
+        user: &str,
+        org: Option<&str>,
+        client_id: &str,
+        scope: &str,
+    ) -> String {
+        let (now, ttl) = {
+            let state = self.shared.state();
+            (state.now(), state.scenario.access_token_ttl)
+        };
+        self.sign_jwt(&serde_json::json!({
+            "iss": self.shared.issuer,
+            "sub": user,
+            "aud": [handlers::bearer::AUDIENCE],
+            "azp": client_id,
+            "scope": scope,
+            "org_context": org,
+            "iat": now,
+            "nbf": now,
+            "exp": now + ttl,
+            "jti": crypto::uuid(),
+        }))
     }
 
     /// Replaces the scenario; tokens, devices and nonces are kept, fault counters reset.
@@ -209,10 +276,7 @@ fn serve(shared: &Shared, mut request: tiny_http::Request) {
             .collect(),
         body,
     };
-    let cid = req
-        .header("X-Correlation-Id")
-        .map(str::to_owned)
-        .unwrap_or_else(crypto::uuid);
+    let cid = correlation_id(&req);
     let (resp, delay) = handlers::handle(shared, &req, &cid);
     if let Some(d) = delay {
         thread::sleep(d);
@@ -220,11 +284,25 @@ fn serve(shared: &Shared, mut request: tiny_http::Request) {
     let mut response = tiny_http::Response::from_data(resp.body.clone())
         .with_status_code(tiny_http::StatusCode(resp.status));
     let mut headers = resp.headers.clone();
-    headers.push(("X-Correlation-Id".into(), cid));
+    let api = req.path.starts_with(handlers::API_PREFIX);
+    let contract = req.path.starts_with(handlers::CONTRACT_PREFIX);
+    if api || contract {
+        headers.push(("X-Correlation-Id".into(), cid));
+    }
     if !resp.has_header("Cache-Control") {
         headers.push(("Cache-Control".into(), "no-store".into()));
     }
-    if let Some(origin) = req.header("Origin") {
+    let origin = req.header("Origin");
+    if handlers::pi_cors_path(&req.path) {
+        headers.push(("Vary".into(), "Origin".into()));
+        if let Some(origin) = origin.filter(|o| allowed_origins(shared).iter().any(|a| a == o)) {
+            headers.push(("Access-Control-Allow-Origin".into(), origin.to_owned()));
+            headers.push((
+                "Access-Control-Expose-Headers".into(),
+                "X-Correlation-Id, Idempotent-Replayed".into(),
+            ));
+        }
+    } else if let Some(origin) = origin.filter(|_| contract) {
         headers.push(("Access-Control-Allow-Origin".into(), origin.to_owned()));
         headers.push((
             "Access-Control-Expose-Headers".into(),
@@ -238,4 +316,31 @@ fn serve(shared: &Shared, mut request: tiny_http::Request) {
         }
     }
     let _ = request.respond(response);
+}
+
+/// PI keeps a client's `X-Correlation-Id` only when it is 8–64 letters, digits or dashes.
+fn correlation_id(req: &Req) -> String {
+    req.header("X-Correlation-Id")
+        .map(str::trim)
+        .filter(|c| {
+            (8..=64).contains(&c.len()) && c.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+        .map_or_else(crypto::uuid, str::to_owned)
+}
+
+/// `CorsSubscriber::allowedOrigins`: scheme, host and port of every registered redirect URI.
+fn allowed_origins(shared: &Shared) -> Vec<String> {
+    shared
+        .state()
+        .clients()
+        .iter()
+        .flat_map(|c| c.redirect_uris.iter())
+        .filter_map(|uri| {
+            let (scheme, rest) = uri.split_once("://")?;
+            let authority = rest.split(['/', '?', '#']).next()?;
+            let authority = authority.rsplit('@').next()?;
+            (matches!(scheme, "http" | "https") && !authority.is_empty())
+                .then(|| format!("{scheme}://{authority}"))
+        })
+        .collect()
 }

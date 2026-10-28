@@ -1,16 +1,14 @@
 use std::{thread, time::Duration};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use erpcons_account::{
-    DEVICE_ENTRY, Error, LicenceState, REFRESH_TOKEN_ENTRY, SecretStore, Status,
-};
+use erpcons_account::{Error, LicenceState, REFRESH_TOKEN_ENTRY, SecretStore, Status};
 use pi_mock::{Authorize, DEFAULT_USER, Scenario, Server};
 use sha2::{Digest, Sha256};
 
 use crate::common::{Env, browser, sign_in, signed_in};
 
 #[test]
-fn happy_path_signs_in_activates_and_sends_contract_headers() {
+fn happy_path_signs_in_against_pi_and_sends_contract_headers() {
     let env = Env::new(Scenario::default());
     let account = env.account();
     assert_eq!(account.status(), Status::Guest);
@@ -21,19 +19,31 @@ fn happy_path_signs_in_activates_and_sends_contract_headers() {
     assert_eq!(user.user_id, DEFAULT_USER);
     assert_eq!(user.email.as_deref(), Some("an.nguyen@example.com"));
     assert_eq!(s.orgs.len(), 2);
+    // Two organizations and no choice made on PI's page: the personal context.
     assert_eq!(s.active_org, None);
-    assert!(matches!(s.licence, LicenceState::Active { .. }));
+    assert_eq!(s.licence, LicenceState::NotActivated);
     assert!(s.online && !s.session_only && !s.reauth_required);
     assert!(env.store.get(REFRESH_TOKEN_ENTRY).unwrap().is_some());
-    assert!(env.store.get(DEVICE_ENTRY).unwrap().is_some());
     assert!(env.file("session.json").exists());
-    assert!(env.file("lease-vanban.json").exists());
-    assert!(env.file("catalog-vanban.jws").exists());
-    assert_eq!(env.server.devices().len(), 1);
+    assert!(!env.file("lease-vanban.json").exists());
+    assert!(!env.file("catalog-vanban.jws").exists());
+    assert!(env.server.devices().is_empty());
 
     let dir = env.dir.path().to_string_lossy().into_owned();
-    for r in env.server.requests() {
-        if r.path == "/authorize" {
+    let requests = env.server.requests();
+    let paths: Vec<&str> = requests.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            "/.well-known/openid-configuration",
+            "/id/authorize",
+            "/id/token",
+            "/api/v1/id/me"
+        ]
+    );
+    for r in &requests {
+        if r.path == "/id/authorize" {
+            assert!(!r.query.contains("prompt="), "first sign-in: {}", r.query);
             continue;
         }
         assert!(r.correlation_id.is_some(), "{} {}", r.method, r.path);
@@ -55,7 +65,7 @@ fn state_mismatch_is_rejected() {
     assert_eq!(account.sign_in(browser), Err(Error::StateMismatch));
     assert_eq!(account.status(), Status::Guest);
     assert_eq!(env.refresh_token(), None);
-    assert_eq!(env.count("POST", "/token"), 0);
+    assert_eq!(env.count("POST", "/id/token"), 0);
 }
 
 #[test]
@@ -94,7 +104,7 @@ fn authorize(server: &Server, challenge: &str, method: &str) -> String {
         .build()
         .new_agent();
     let url = format!(
-        "{}/authorize?response_type=code&client_id=erpcons-office-desktop&redirect_uri=http%3A%2F%2F127.0.0.1%3A9%2Fcallback&scope=openid&state=s&nonce=n&code_challenge={challenge}&code_challenge_method={method}",
+        "{}/id/authorize?response_type=code&client_id=erpcons-office-desktop&redirect_uri=http%3A%2F%2F127.0.0.1%3A9%2Fcallback&scope=openid&state=s&nonce=n&code_challenge={challenge}&code_challenge_method={method}",
         server.base_url()
     );
     let resp = agent.get(&url).call().unwrap();
@@ -115,7 +125,7 @@ fn exchange(server: &Server, code: &str, verifier: &str) -> u16 {
         "grant_type=authorization_code&code={code}&redirect_uri=http%3A%2F%2F127.0.0.1%3A9%2Fcallback&client_id=erpcons-office-desktop&code_verifier={verifier}"
     );
     agent
-        .post(&format!("{}/token", server.base_url()))
+        .post(&format!("{}/id/token", server.base_url()))
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send(body.as_bytes())
         .unwrap()
@@ -140,8 +150,8 @@ fn mock_enforces_pkce_s256() {
 
     let code = code_of(&authorize(&server, &challenge, "S256"));
     assert_eq!(exchange(&server, &code, &wrong), 400);
-    // A failed exchange burns the code.
-    assert_eq!(exchange(&server, &code, &verifier), 400);
+    // As in PI, a PKCE mismatch leaves the code usable by the real holder of the verifier.
+    assert_eq!(exchange(&server, &code, &verifier), 200);
 
     let code = code_of(&authorize(&server, &challenge, "S256"));
     assert_eq!(exchange(&server, &code, &verifier), 200);

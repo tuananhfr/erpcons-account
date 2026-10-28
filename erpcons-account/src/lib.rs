@@ -1,5 +1,6 @@
-//! PI account client for the ERPCons Office desktop apps: OIDC sign-in, the shared desktop
-//! session, device activation, offline leases and `allowed(feature)`.
+//! PI account client for the ERPCons Office desktop apps: OIDC sign-in with PI ID, the shared
+//! desktop session, organization context and `allowed(feature)`. Device activation and offline
+//! leases are kept behind [`Config::offline_licensing`], off until PI serves them (ADR 0011).
 //!
 //! Blocking API meant for a worker thread. Specification: `docs/` of this repository.
 #[cfg(target_arch = "wasm32")]
@@ -17,6 +18,7 @@ mod http;
 mod jose;
 mod lease;
 mod loopback;
+mod me;
 mod oidc;
 mod random;
 mod secrets;
@@ -29,7 +31,8 @@ pub use backoff::Backoff;
 pub use catalog::{BuiltinFeature, Tier, is_pinned_free, is_valid_feature_id};
 pub use clock::{Clock, SystemClock};
 pub use config::{
-    Config, DESKTOP_CLIENT_ID, DESKTOP_SCOPES, PLATFORM_KEYS, PinnedKey, Platform, Product,
+    Config, DESKTOP_CLIENT_ID, DESKTOP_SCOPES, PI_API_PATH, PLATFORM_KEYS, PinnedKey, Platform,
+    Product,
 };
 pub use error::{ApiCode, ApiError, Error, RevocationReason, VerifyError};
 pub use secrets::{

@@ -1,15 +1,23 @@
-//! Routing, faults, bearer authentication and idempotency (contract §2, §3).
+//! Routing, faults and idempotency. PI's own paths (`/id/*`, `/api/v1/id/*`) answer as PI does;
+//! `/v1/*` are the Office contract's licensing endpoints, which PI does not have (ADR 0011).
 mod api;
+pub(crate) mod bearer;
+mod contract;
 mod devices;
 mod oidc;
 
 use std::time::Duration;
 
+use serde_json::json;
+
 use crate::{
     FaultAction, Shared, crypto,
     http::{Req, Resp},
-    state::{AccessRecord, Idempotency, RecordedRequest, State, Stored},
+    state::{Auth, Idempotency, RecordedRequest, State, Stored},
 };
+
+pub(crate) const API_PREFIX: &str = "/api/";
+pub(crate) const CONTRACT_PREFIX: &str = "/v1/";
 
 pub(crate) struct Ctx<'a> {
     pub issuer: &'a str,
@@ -20,6 +28,11 @@ impl Ctx<'_> {
     pub(crate) fn problem(&self, status: u16, code: &str) -> Resp {
         Resp::problem(status, code, self.issuer, self.cid)
     }
+}
+
+/// Paths where PI's `CorsSubscriber` applies.
+pub(crate) fn pi_cors_path(path: &str) -> bool {
+    ["/id/token", "/id/revoke", "/id/userinfo"].contains(&path) || path.starts_with("/api/v1/id/")
 }
 
 pub(crate) fn handle(shared: &Shared, req: &Req, cid: &str) -> (Resp, Option<Duration>) {
@@ -39,6 +52,9 @@ pub(crate) fn handle(shared: &Shared, req: &Req, cid: &str) -> (Resp, Option<Dur
         cid,
     };
     if req.method == "OPTIONS" {
+        if !pi_cors_path(&req.path) && !req.path.starts_with(CONTRACT_PREFIX) {
+            return (Resp::text(405, ""), None);
+        }
         let resp = Resp::text(204, "")
             .with_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             .with_header(
@@ -55,7 +71,7 @@ pub(crate) fn handle(shared: &Shared, req: &Req, cid: &str) -> (Resp, Option<Dur
             code,
             retry_after,
         }) => {
-            let mut resp = ctx.problem(status, &code);
+            let mut resp = fault(&ctx, &req.path, status, &code);
             if let Some(s) = retry_after {
                 resp = resp.with_header("Retry-After", &s.to_string());
             }
@@ -70,79 +86,61 @@ pub(crate) fn handle(shared: &Shared, req: &Req, cid: &str) -> (Resp, Option<Dur
     (route(&mut st, &ctx, req), delay)
 }
 
+/// An injected error in the format of the path's owner.
+fn fault(ctx: &Ctx, path: &str, status: u16, code: &str) -> Resp {
+    if path.starts_with(CONTRACT_PREFIX) {
+        return ctx.problem(status, code);
+    }
+    let mut resp = Resp::pi_status(status);
+    let mut body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
+    if !code.is_empty() {
+        body["code"] = code.into();
+    }
+    // `ApiExceptionSubscriber` adds the correlation id to the body of every 5xx.
+    if status >= 500 && path.starts_with(API_PREFIX) {
+        body["correlationId"] = ctx.cid.into();
+    }
+    resp.body = body.to_string().into_bytes();
+    resp
+}
+
 fn route(st: &mut State, ctx: &Ctx, req: &Req) -> Resp {
     let path = req.path.as_str();
     match (req.method.as_str(), path) {
         ("GET", "/.well-known/openid-configuration") => oidc::discovery(ctx),
-        ("GET", "/authorize") => oidc::authorize(st, ctx, req),
-        ("POST", "/token") => oidc::token(st, ctx, req),
-        ("POST", "/revoke") => oidc::revoke(st, req),
-        ("GET", "/jwks") => oidc::jwks(),
-        ("GET", "/logout") => Resp::text(200, ""),
-        ("GET", "/v1/me") => api::me(st, ctx, req),
-        ("GET", "/v1/me/entitlements") => api::entitlements(st, ctx, req),
+        ("GET", "/id/jwks.json") => oidc::jwks(st),
+        ("GET", "/id/authorize") => oidc::authorize(st, ctx, req),
+        ("POST", "/id/token") => oidc::token(st, ctx, req),
+        ("POST", "/id/revoke") => oidc::revoke(st, req),
+        ("GET", "/id/userinfo") => oidc::userinfo(st, req),
+        ("GET", "/id/logout") => oidc::logout(st, req),
+        ("GET", "/api/v1/id/me") => api::me(st, req),
+        ("GET", "/v1/me/entitlements") => contract::entitlements(st, ctx, req),
         ("GET", p) if p.starts_with("/v1/products/") && p.ends_with("/feature-catalog") => {
-            api::catalog(st, ctx, p)
+            contract::catalog(st, ctx, p)
         }
         ("POST", "/v1/devices/challenges") => idempotent(st, ctx, req, false, devices::challenge),
         ("POST", "/v1/devices/activate") => idempotent(st, ctx, req, false, devices::activate),
         ("POST", "/v1/licenses/refresh") => idempotent(st, ctx, req, true, devices::refresh),
-        _ => ctx.problem(404, "not_found"),
+        (_, p) if p.starts_with(API_PREFIX) => Resp::pi_status(404),
+        (_, p) if p.starts_with(CONTRACT_PREFIX) => ctx.problem(404, "not_found"),
+        _ => Resp::html(404, "Không tìm thấy", "Không tìm thấy trang."),
     }
 }
 
-/// Bearer token check. `lenient` skips the suspension and membership checks, which lease
-/// refresh reports as `status: revoked` instead.
-pub(crate) fn bearer(
-    st: &State,
-    ctx: &Ctx,
-    req: &Req,
-    scope: &str,
-    lenient: bool,
-) -> Result<AccessRecord, Resp> {
-    let token = req
-        .header("Authorization")
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .ok_or_else(|| ctx.problem(401, "unauthenticated"))?;
-    let rec = st
-        .access
-        .get(token)
-        .filter(|a| a.exp > st.now())
-        .cloned()
-        .ok_or_else(|| ctx.problem(401, "unauthenticated"))?;
-    if !lenient {
-        if st.user(&rec.user_id).is_none_or(|u| u.suspended) {
-            return Err(ctx.problem(403, "user_suspended"));
-        }
-        if let Some(org) = &rec.org
-            && st.membership_status(&rec.user_id, org).as_deref() != Some("active")
-        {
-            return Err(ctx.problem(403, "membership_inactive"));
-        }
-    }
-    if !rec.scope.split(' ').any(|s| s == scope) {
-        return Err(ctx.problem(403, "insufficient_scope"));
-    }
-    Ok(rec)
-}
+type Handler = fn(&mut State, &Ctx, &Req, &Auth) -> Resp;
 
-type Handler = fn(&mut State, &Ctx, &Req, &AccessRecord) -> Resp;
-
-/// `Idempotency-Key` semantics: same key and body replays, another body is 422 (contract §2).
+/// `Idempotency-Key` semantics of the Office contract: same key and body replays, another body
+/// is 422 (contract §2).
 fn idempotent(st: &mut State, ctx: &Ctx, req: &Req, lenient: bool, handler: Handler) -> Resp {
-    let auth = match bearer(st, ctx, req, "pi.devices", lenient) {
+    let auth = match bearer::check(st, req, "pi.devices", lenient) {
         Ok(a) => a,
-        Err(r) => return r,
+        Err(denied) => return denied.problem(ctx),
     };
     let Some(key) = req.header("Idempotency-Key").map(str::to_owned) else {
         return ctx.problem(400, "idempotency_key_missing");
     };
-    let slot = (
-        auth.user_id.clone(),
-        auth.client_id.clone(),
-        req.path.clone(),
-        key,
-    );
+    let slot = (auth.user_id.clone(), req.path.clone(), key);
     let hash = crypto::sha256(&req.body);
     match st.idempotency.get(&slot) {
         Some(r) if r.body_hash != hash => return ctx.problem(422, "idempotency_key_reused"),
@@ -150,7 +148,7 @@ fn idempotent(st: &mut State, ctx: &Ctx, req: &Req, lenient: bool, handler: Hand
             response: Some(stored),
             ..
         }) => {
-            let mut resp = Resp::json(stored.status, &serde_json::Value::Null);
+            let mut resp = Resp::json(stored.status, &json!(null));
             resp.body = stored.body.clone();
             if stored.status >= 400 {
                 resp.headers[0].1 = "application/problem+json".into();

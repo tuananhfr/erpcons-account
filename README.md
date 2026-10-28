@@ -7,9 +7,12 @@ their wasm web apps on `office.erpcons.ai`. On desktop the four apps share one P
 user: one sign-in, one registered device per machine, one lease per product (ADR 0010).
 
 ERPCons Office is a consumer of the PI Platform (HS05: product teams do not build
-IAM). The platform is built by another team and does not exist yet; Office is
-developed against a mock of the contract below and connected to the real platform
-later.
+IAM). The library was first written against the contract in `docs/`, before PI existed. It now
+talks to the real PI Platform (PI ID): PI's paths, `/api/v1/id/me`, its error envelope,
+organization switching with `org_hint`; offline licensing (device activation, leases, the
+entitlement list and the signed catalog) is kept but turned off by `Config::offline_licensing`.
+**Where this README, the contract or ADRs 0004/0008 differ from
+[ADR 0011](docs/adr/0011-real-pi-platform.md), ADR 0011 wins.**
 
 The crate follows the style of `../erpcons-update`: a blocking library, `ureq`,
 Ed25519 verification with pinned keys, typed errors, no UI text. Forks pin it by git tag.
@@ -39,9 +42,16 @@ if account.take_refresh_request() { /* run account.refresh() on a worker */ }
 
 `Account` is `Send + Sync` and keeps no global state. Calls that touch the network block; run
 them off the UI thread. `reload()` re-reads the session shared by the four apps (window focus),
-`select_org(Some(id))` / `select_org(None)` switches organization context, `sign_out()` revokes
+`select_org(Some(id), open_browser)` / `select_org(None, open_browser)` switches organization
+context by running PI's authorization again (`org_hint`, or `prompt=select_account` to pick
+personal; ADR 0011), `sign_out()` revokes
 and clears the shared session. The secret store is the OS keyring (service `ERPCons Office PI`);
 when it is unavailable the session lives in memory only and `Status` reports `session_only`.
+
+`Config::api_base` is the base of PI's end-user API (default `{issuer}/api/v1/id`). With
+`Config::offline_licensing` off (the default) no device, lease, entitlement or catalog endpoint is
+called and `pro` features are denied; turning it on targets the Office contract's `/v1/` endpoints
+(pi-mock), not PI, whose device protocol differs (ADR 0011).
 
 Release builds pin `PLATFORM_KEYS` in `src/config.rs`; it is empty until PI publishes its
 signing keys. Tests and E2E runs set `Config::platform_keys` to the mock's key.
@@ -56,13 +66,17 @@ In tests:
 let server = pi_mock::Server::start(pi_mock::Scenario::default());
 let mut config = Config::new(server.issuer(), Product::VanBan, "1.0.0");
 config.platform_keys = vec![PinnedKey { kid: server.lease_key_id(), key: server.lease_public_key() }];
+config.offline_licensing = true; // only to test the licensing code against pi-mock's /v1/ endpoints
 server.update_scenario(|s| s.entitlements.clear()); // or set_scenario, add_fault, revoke_device...
 ```
 
 As a process: `cargo run -p pi-mock -- --port 8787 [--host 0.0.0.0] [--issuer URL]
-[--web-redirect URI]...`. It prints one JSON line with the base URL, issuer, lease `kid` and lease
-public key (hex). The lease key is a fixed development key derived from a public label; release
-builds never pin it.
+[--web-redirect URI]...`. It prints one JSON line with the base URL, issuer, lease `kid`, lease
+public key (hex), signing `kid` and JWKS URI. pi-mock behaves like PI's code (ADR 0011): `/id/*`
+OIDC endpoints, EdDSA access and ID tokens published at `/id/jwks.json`, `org_hint` and the
+organization page (`Scenario::org_choice`), `/api/v1/id/me`, PI's envelope and CORS rules. Its
+Office-contract licensing endpoints under `/v1/` are not PI's. The signing and lease keys are fixed
+development keys derived from public labels; release builds never pin them.
 
 ## Checks
 
@@ -77,7 +91,7 @@ cargo xwin clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -
 
 | Document | Content |
 |---|---|
-| [docs/contract.openapi.yaml](docs/contract.openapi.yaml) | OpenAPI 3.1: OIDC usage and every PI Platform endpoint Office calls, with examples |
+| [docs/contract.openapi.yaml](docs/contract.openapi.yaml) | OpenAPI 3.1: the original Office contract; superseded in part by ADR 0011 (operations marked `x-superseded-by`) |
 | [docs/lease.md](docs/lease.md) | Offline lease and device proof format, offline policy, trusted time, client verification order |
 | [docs/products.md](docs/products.md) | Product registry entries, feature catalog, `allowed(feature)` |
 | [docs/adr/](docs/adr/) | Decisions; [0000](docs/adr/0000-source-inconsistencies.md) lists contradictions in the PI spec package and their resolution |

@@ -1,4 +1,6 @@
-//! Device activation, lease refresh and revocation (lease.md §3, §6, §8, §9).
+//! Device activation, lease refresh and revocation (lease.md §3, §6, §8, §9), in the wire format
+//! of the Office contract. PI's device protocol differs, so all of it stays behind
+//! `Config::offline_licensing`, off by default (ADR 0011).
 use std::collections::BTreeSet;
 
 use serde::Deserialize;
@@ -39,7 +41,7 @@ struct Challenge {
 impl Account {
     /// Activates or refreshes this app's lease when lease.md §6 says so.
     pub(super) fn sync_licence(&self, ops: &mut Ops) -> Result<(), Error> {
-        if !self.persistent {
+        if !self.persistent || !self.cfg.offline_licensing {
             return Ok(());
         }
         let now = self.effective_now();
@@ -72,6 +74,9 @@ impl Account {
 
     /// `POST /v1/devices/activate` for this product, under the shared lock.
     pub(super) fn activate(&self, ops: &mut Ops) -> Result<(), Error> {
+        if !self.cfg.offline_licensing {
+            return Ok(());
+        }
         if !self.persistent {
             return Err(Error::CredentialStoreUnavailable);
         }
@@ -120,9 +125,10 @@ impl Account {
         let device = self.ensure_device(ops)?;
         let nonce = self.challenge(ops, "activate", &device)?;
         let proof = self.proof(&device, &nonce, "activate", None)?;
+        let url = self.cfg.contract_url("/v1/devices/activate");
         let reply = self.api_post(
             ops,
-            "/v1/devices/activate",
+            &url,
             &json!({
                 "installation_id": device.installation_id,
                 "product_id": self.cfg.product.id(),
@@ -173,9 +179,10 @@ impl Account {
             .ok_or(Error::ActivationBlocked)?;
         let nonce = self.challenge(ops, "refresh", &device)?;
         let proof = self.proof(&device, &nonce, "refresh", Some(&device_id))?;
+        let url = self.cfg.contract_url("/v1/licenses/refresh");
         let reply = self.api_post(
             ops,
-            "/v1/licenses/refresh",
+            &url,
             &json!({
                 "device_id": device_id,
                 "installation_id": device.installation_id,
@@ -192,9 +199,10 @@ impl Account {
     }
 
     fn challenge(&self, ops: &mut Ops, purpose: &str, device: &Device) -> Result<String, Error> {
+        let url = self.cfg.contract_url("/v1/devices/challenges");
         let reply = self.api_post(
             ops,
-            "/v1/devices/challenges",
+            &url,
             &json!({
                 "purpose": purpose,
                 "installation_id": device.installation_id,
@@ -307,13 +315,8 @@ impl Account {
                 s.device_id = None;
                 s.device_revoked = true;
             })?,
-            RevocationReason::MembershipRevoked => {
-                self.rotate(ops, Some("personal"), true)?;
-                self.fetch_me(ops)?;
-                if let Err(e) = self.activate(ops) {
-                    log::warn!("activation in the personal context failed: {e}");
-                }
-            }
+            // PI cannot move a token family to the personal context; the user signs in again.
+            RevocationReason::MembershipRevoked => self.view_mut().reauth = true,
             RevocationReason::UserSuspended => self.wipe(ops, false)?,
         }
         Err(Error::Revoked(reason))

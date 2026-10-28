@@ -1,5 +1,5 @@
 //! OIDC discovery, authorization request, token grants, revocation and ID token checks
-//! (contract §1).
+//! (contract §1 as amended by ADR 0011).
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -89,7 +89,10 @@ pub(crate) struct AuthorizeRequest<'a> {
     pub state: &'a str,
     pub nonce: &'a str,
     pub code_challenge: &'a str,
-    pub org_context: Option<&'a str>,
+    /// PI `org_hint`: an organization UUID; PI ignores it unless it is an active membership.
+    pub org_hint: Option<&'a str>,
+    /// PI accepts one value: `login`, `none` or `select_account`.
+    pub prompt: Option<&'a str>,
     pub ui_locale: Option<&'a str>,
 }
 
@@ -104,8 +107,11 @@ pub(crate) fn authorize_url(d: &Discovery, r: &AuthorizeRequest) -> String {
         ("code_challenge", r.code_challenge),
         ("code_challenge_method", "S256"),
     ];
-    if let Some(org) = r.org_context {
-        params.push(("org_context", org));
+    if let Some(org) = r.org_hint {
+        params.push(("org_hint", org));
+    }
+    if let Some(prompt) = r.prompt {
+        params.push(("prompt", prompt));
     }
     if let Some(locale) = r.ui_locale {
         params.push(("ui_locales", locale));
@@ -194,23 +200,20 @@ pub(crate) fn exchange_code(
     token_request(http, d, &body)
 }
 
-/// Refresh grant; `org_context` is an `org_id` or `personal` (ADR 0008).
+/// Refresh grant. PI keeps the organization of the token family; only a new authorization
+/// request changes it (ADR 0011).
 pub(crate) fn refresh(
     http: &Http,
     d: &Discovery,
     client_id: &str,
     refresh_token: &str,
-    org_context: Option<&str>,
 ) -> Result<Tokens, Error> {
-    let mut pairs = vec![
+    let body = form(&[
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
         ("client_id", client_id),
-    ];
-    if let Some(org) = org_context {
-        pairs.push(("org_context", org));
-    }
-    token_request(http, d, &form(&pairs))
+    ]);
+    token_request(http, d, &body)
 }
 
 /// RFC 7009 revocation; one attempt, as sign-out proceeds whatever the outcome.

@@ -108,6 +108,54 @@ impl Resp {
         r
     }
 
+    /// PI's success envelope `{ok: true, ...}` (`ApiResponse::ok`).
+    pub(crate) fn pi_ok(status: u16, mut data: Value) -> Self {
+        if let Value::Object(map) = &mut data {
+            map.insert("ok".into(), true.into());
+        }
+        Self::json(status, &data)
+    }
+
+    /// PI's error envelope `{ok: false, message, code?}` (`ApiResponse::error`).
+    pub(crate) fn pi_error(status: u16, message: &str, code: Option<&str>) -> Self {
+        let mut body = json!({ "ok": false, "message": message });
+        if let Some(code) = code.filter(|c| !c.is_empty()) {
+            body["code"] = code.into();
+        }
+        Self::json(status, &body)
+    }
+
+    /// `ApiExceptionSubscriber`'s message for a status without a business message.
+    pub(crate) fn pi_status(status: u16) -> Self {
+        let message = match status {
+            401 => "Bạn chưa đăng nhập hoặc phiên đã hết hạn.",
+            403 => "Bạn không có quyền thực hiện thao tác này.",
+            404 => "Không tìm thấy tài nguyên.",
+            405 => "Phương thức không được hỗ trợ cho đường dẫn này.",
+            429 => "Bạn thao tác quá nhanh, vui lòng thử lại sau.",
+            s if s >= 500 => "Lỗi hệ thống.",
+            _ => "Yêu cầu không hợp lệ.",
+        };
+        Self::pi_error(status, message, None)
+    }
+
+    /// OAuth error body of `/id/token` (`{error, error_description}`).
+    pub(crate) fn oauth(status: u16, error: &str, description: &str) -> Self {
+        Self::json(
+            status,
+            &json!({ "error": error, "error_description": description }),
+        )
+    }
+
+    /// PI's login page (`LoginPage::render`), reduced to its message.
+    pub(crate) fn html(status: u16, title: &str, message: &str) -> Self {
+        Self {
+            status,
+            headers: vec![("Content-Type".into(), "text/html; charset=utf-8".into())],
+            body: format!("<!doctype html><title>{title}</title><p>{message}</p>").into_bytes(),
+        }
+    }
+
     pub(crate) fn oauth_error(status: u16, error: &str) -> Self {
         Self::json(status, &json!({ "error": error }))
     }

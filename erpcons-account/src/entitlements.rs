@@ -1,7 +1,8 @@
-//! Online entitlement list and its tenant-isolation sanity check (products.md §4).
+//! Online entitlement list of the Office contract and its tenant-isolation sanity check
+//! (products.md §4). PI's `/me/entitlements` has another shape; not called (ADR 0011).
 use serde::Deserialize;
 
-use crate::{Error, Product, status::Membership};
+use crate::{Error, Product};
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct Entitlement {
@@ -16,16 +17,6 @@ struct EntitlementList {
     product_id: String,
     org_context: Option<String>,
     entitlements: Vec<Entitlement>,
-}
-
-/// `GET /v1/me` body.
-#[derive(Clone, Debug, Deserialize)]
-pub(crate) struct Me {
-    pub user_id: String,
-    pub display_name: String,
-    pub email: Option<String>,
-    pub org_context: Option<String>,
-    pub memberships: Vec<Membership>,
 }
 
 /// Parses an entitlement list; another product's or tenant's data discards the whole response.

@@ -1,5 +1,6 @@
-//! Sign-in, token rotation, authorized API calls, identity, entitlements and catalog
-//! (contract §1 to §3, products.md §3 and §4).
+//! Sign-in and organization switch through the browser, token rotation, authorized API calls,
+//! identity from PI's `/me` (ADR 0011), and the Office-contract entitlements and catalog
+//! (products.md §3 and §4) used only with `offline_licensing`.
 use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
@@ -12,10 +13,10 @@ use super::{
     shared::{Floor, Profile, SessionFile, store_error},
 };
 use crate::{
-    ApiCode, DESKTOP_SCOPES, Error, Product, catalog,
-    entitlements::{self, Me},
+    ApiCode, ApiError, DESKTOP_SCOPES, Error, MembershipStatus, Product, catalog, entitlements,
     http::{Body, Reply, Retry},
     loopback::{Loopback, Pages},
+    me::{self, Me},
     oidc::{self, AuthorizeRequest, Discovery, Tokens},
     random,
     secrets::REFRESH_TOKEN_ENTRY,
@@ -33,10 +34,94 @@ impl Drop for ClearOnDrop<'_> {
     }
 }
 
+/// What a browser authorization asks PI for, beyond the standard parameters.
+struct Ask<'a> {
+    org_hint: Option<&'a str>,
+    prompt: Option<&'a str>,
+    /// The session must stay this user's (organization switch).
+    same_user: Option<&'a str>,
+}
+
 impl Account {
     /// Signs in through the system browser. `open_browser` receives the authorization URL; the
     /// call returns on the loopback callback, an error, a timeout or [`Account::cancel_sign_in`].
+    /// After a [`Account::sign_out`] it asks PI for `prompt=login`.
     pub fn sign_in<F>(&self, open_browser: F) -> Result<(), Error>
+    where
+        F: FnOnce(&str) -> Result<(), String>,
+    {
+        let prompt = {
+            let mut ops = super::lock(&self.ops);
+            self.reload_with(&mut ops)?;
+            (ops.login_prompt || self.view().session.login_prompt).then_some("login")
+        };
+        self.browser_session(
+            open_browser,
+            &Ask {
+                org_hint: None,
+                prompt,
+                same_user: None,
+            },
+        )
+    }
+
+    /// Switches all four apps to `org_id`, or to the personal context with `None`, by running the
+    /// authorization again: PI binds the organization to the token family and its refresh grant
+    /// cannot change it (ADR 0011). `org_id` goes as `org_hint`; `None` sends
+    /// `prompt=select_account`, where the user picks "personal" on PI's page.
+    ///
+    /// Returns [`Error::OrgUnavailable`] when PI granted another context; the session then holds
+    /// the context PI granted. Blocks like [`Account::sign_in`] and is cancelled the same way.
+    pub fn select_org<F>(&self, org_id: Option<&str>, open_browser: F) -> Result<(), Error>
+    where
+        F: FnOnce(&str) -> Result<(), String>,
+    {
+        let user = {
+            let mut ops = super::lock(&self.ops);
+            self.reload_with(&mut ops)?;
+            let view = self.view();
+            if !view.signed_in {
+                return Err(Error::NotSignedIn);
+            }
+            if let Some(id) = org_id {
+                let member = view.session.profile.as_ref().is_some_and(|p| {
+                    p.memberships
+                        .iter()
+                        .any(|m| m.org_id == id && m.status == MembershipStatus::Active)
+                });
+                if !member {
+                    return Err(Error::UnknownOrg);
+                }
+            }
+            view.session.user_id.clone()
+        };
+        let (org_hint, prompt) = match org_id {
+            Some(id) => (Some(id), None),
+            None => (None, Some("select_account")),
+        };
+        self.browser_session(
+            open_browser,
+            &Ask {
+                org_hint,
+                prompt,
+                same_user: user.as_deref(),
+            },
+        )?;
+        if self.view().session.org_context.as_deref() != org_id {
+            log::warn!("PI granted another organization context than the one requested");
+            return Err(Error::OrgUnavailable);
+        }
+        Ok(())
+    }
+
+    /// Stops a pending [`Account::sign_in`] or [`Account::select_org`], which then returns
+    /// [`Error::Cancelled`].
+    pub fn cancel_sign_in(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    /// Authorization code flow with PKCE through the loopback redirect, then the new session.
+    fn browser_session<F>(&self, open_browser: F, ask: &Ask) -> Result<(), Error>
     where
         F: FnOnce(&str) -> Result<(), String>,
     {
@@ -60,7 +145,8 @@ impl Account {
                 state: &state,
                 nonce: &nonce,
                 code_challenge: &oidc::pkce_challenge(&verifier),
-                org_context: None,
+                org_hint: ask.org_hint,
+                prompt: ask.prompt,
                 ui_locale: self.cfg.ui_locale.as_deref(),
             },
         );
@@ -90,35 +176,19 @@ impl Account {
             &verifier,
             &redirect_uri,
         )?;
-        let id_token = tokens
-            .id_token
-            .as_deref()
-            .ok_or(Error::InvalidIdToken("missing"))?;
-        let sub = oidc::check_id_token(
-            id_token,
-            &self.cfg.issuer,
-            &self.cfg.client_id,
-            &nonce,
-            self.effective_now(),
-        )?;
         let refresh = tokens
             .refresh_token
             .clone()
             .ok_or_else(|| Error::BadResponse("no refresh token".into()))?;
         let access = Access::new(&tokens, self.mono());
-        let reply = self.http.retrying(Retry::Idempotent, || {
-            self.http
-                .get(&format!("{}/v1/me", self.cfg.api()), Some(&access.token))
-        })?;
-        if !reply.ok() {
-            return Err(reply.error());
-        }
-        let me: Me = reply.json()?;
-        if me.user_id != sub {
-            return Err(Error::BadResponse(
-                "user_id differs from the ID token sub".into(),
-            ));
-        }
+        let me = match self.identity(&tokens, &access, &nonce, ask) {
+            Ok(me) => me,
+            Err(e) => {
+                // The new token family is not kept, so it must not stay valid at PI either.
+                self.try_revoke(&mut ops, &refresh);
+                return Err(e);
+            }
+        };
         self.establish(&mut ops, refresh, &me)?;
         ops.access = Some(access);
         {
@@ -132,12 +202,52 @@ impl Account {
         Ok(())
     }
 
-    /// Stops a pending [`Account::sign_in`], which then returns [`Error::Cancelled`].
-    pub fn cancel_sign_in(&self) {
-        self.cancel.store(true, Ordering::SeqCst);
+    /// ID token checks, then PI's `/me` for the same subject.
+    fn identity(
+        &self,
+        tokens: &Tokens,
+        access: &Access,
+        nonce: &str,
+        ask: &Ask,
+    ) -> Result<Me, Error> {
+        let id_token = tokens
+            .id_token
+            .as_deref()
+            .ok_or(Error::InvalidIdToken("missing"))?;
+        let sub = oidc::check_id_token(
+            id_token,
+            &self.cfg.issuer,
+            &self.cfg.client_id,
+            nonce,
+            self.effective_now(),
+        )?;
+        let url = self.cfg.pi_url("/me");
+        let reply = self.http.retrying(Retry::Idempotent, || {
+            self.http.get(&url, Some(&access.token))
+        })?;
+        if !reply.ok() {
+            return Err(reply.error());
+        }
+        let me = me::parse(&reply.body)?;
+        if me.user_id != sub {
+            return Err(Error::BadResponse(
+                "user id differs from the ID token sub".into(),
+            ));
+        }
+        if me.locked {
+            return Err(account_locked());
+        }
+        if ask.same_user.is_some_and(|u| u != me.user_id) {
+            log::warn!("PI signed in another account during an organization switch; ignored");
+            return Err(Error::OrgUnavailable);
+        }
+        Ok(me)
     }
 
     fn sync_after_sign_in(&self, ops: &mut Ops) -> Result<(), Error> {
+        if !self.cfg.offline_licensing {
+            return Ok(());
+        }
         if let Err(e) = self.sync_catalog(ops) {
             log::warn!("feature catalog not updated: {e}");
         }
@@ -145,11 +255,14 @@ impl Account {
         self.sync_licence(ops)
     }
 
-    /// Stores the new session for all four apps (ADR 0010).
+    /// Stores the new session for all four apps (ADR 0010) and revokes the one it replaces.
     fn establish(&self, ops: &mut Ops, refresh: String, me: &Me) -> Result<(), Error> {
         let profile = profile(me);
+        ops.login_prompt = false;
         if !self.persistent {
-            ops.memory_refresh = Some(refresh);
+            if let Some(old) = ops.memory_refresh.replace(refresh) {
+                self.try_revoke(ops, &old);
+            }
             let mut view = self.view_mut();
             view.signed_in = true;
             view.entitlements = None;
@@ -164,9 +277,13 @@ impl Account {
         self.locked(ops, |ops| {
             self.ensure_device(ops)?;
             let previous = self.read_session_disk(ops).unwrap_or_default();
+            let replaced = self.refresh_token().ok().flatten();
             self.store
                 .set(REFRESH_TOKEN_ENTRY, &refresh)
                 .map_err(store_error)?;
+            if let Some(old) = replaced.filter(|old| *old != refresh) {
+                self.try_revoke(ops, &old);
+            }
             let same = previous.user_id.as_deref() == Some(me.user_id.as_str())
                 && previous.org_context == me.org_context;
             if !same {
@@ -195,16 +312,10 @@ impl Account {
     }
 
     /// Refresh grant with rotation, under the lock after re-reading the stored token
-    /// (ADR 0010). `org` switches the context; `invalid_grant` signs out when `wipe_on_invalid`.
-    pub(super) fn rotate(
-        &self,
-        ops: &mut Ops,
-        org: Option<&str>,
-        wipe_on_invalid: bool,
-    ) -> Result<(), Error> {
+    /// (ADR 0010); `invalid_grant` signs out when `wipe_on_invalid`.
+    pub(super) fn rotate(&self, ops: &mut Ops, wipe_on_invalid: bool) -> Result<(), Error> {
         let discovery = self.discovery(ops)?;
-        let grant =
-            |token: &str| oidc::refresh(&self.http, &discovery, &self.cfg.client_id, token, org);
+        let grant = |token: &str| oidc::refresh(&self.http, &discovery, &self.cfg.client_id, token);
         let result: Result<Tokens, Error> = if self.persistent {
             self.locked(ops, |ops| {
                 self.reload_with(ops)?;
@@ -215,9 +326,6 @@ impl Account {
                             self.store
                                 .set(REFRESH_TOKEN_ENTRY, next)
                                 .map_err(store_error)?;
-                        }
-                        if let Some(org) = org {
-                            self.switch_context(ops, org)?;
                         }
                         Ok(tokens)
                     }
@@ -235,9 +343,6 @@ impl Account {
                 Ok(tokens) => {
                     if let Some(next) = &tokens.refresh_token {
                         ops.memory_refresh = Some(next.clone());
-                    }
-                    if let Some(org) = org {
-                        self.switch_context(ops, org)?;
                     }
                     Ok(tokens)
                 }
@@ -261,30 +366,13 @@ impl Account {
         }
     }
 
-    /// New context for all four apps: every lease and the context's device id are dropped.
-    fn switch_context(&self, ops: &mut Ops, org: &str) -> Result<(), Error> {
-        let org = (org != "personal").then(|| org.to_owned());
-        self.view_mut().entitlements = None;
-        if !self.persistent {
-            self.view_mut().session.org_context = org;
-            return Ok(());
-        }
-        self.remove_leases(None)?;
-        self.update_session(ops, |s| {
-            s.org_context = org;
-            s.device_id = None;
-            s.device_revoked = false;
-            s.device_cap_reached = false;
-        })
-    }
-
     pub(super) fn access_token(&self, ops: &mut Ops) -> Result<String, Error> {
         if let Some(a) = &ops.access
             && self.mono() + ACCESS_MARGIN < a.expires
         {
             return Ok(a.token.clone());
         }
-        self.rotate(ops, None, true)?;
+        self.rotate(ops, true)?;
         ops.access
             .as_ref()
             .map(|a| a.token.clone())
@@ -313,11 +401,10 @@ impl Account {
         Err(error)
     }
 
-    pub(super) fn api_get(&self, ops: &mut Ops, path: &str) -> Result<Reply, Error> {
-        let url = format!("{}{path}", self.cfg.api());
+    pub(super) fn api_get(&self, ops: &mut Ops, url: &str) -> Result<Reply, Error> {
         self.authorized(ops, |token| {
             self.http
-                .retrying(Retry::Idempotent, || self.http.get(&url, Some(token)))
+                .retrying(Retry::Idempotent, || self.http.get(url, Some(token)))
         })
     }
 
@@ -325,20 +412,19 @@ impl Account {
     pub(super) fn api_post(
         &self,
         ops: &mut Ops,
-        path: &str,
+        url: &str,
         body: &serde_json::Value,
     ) -> Result<Reply, Error> {
-        let url = format!("{}{path}", self.cfg.api());
         let bytes = serde_json::to_vec(body).map_err(|e| Error::Internal(e.to_string()))?;
         let key = random::uuid_v4()?;
         self.authorized(ops, |token| {
             self.http.retrying(Retry::Idempotent, || {
-                self.http.post(&url, Some(token), &Body::Json(&bytes), &key)
+                self.http.post(url, Some(token), &Body::Json(&bytes), &key)
             })
         })
     }
 
-    /// Error-table actions that do not depend on the operation (contract §3).
+    /// Error actions that do not depend on the operation (ADR 0011, contract §3).
     fn on_api_error(&self, ops: &mut Ops, error: &Error) -> Result<(), Error> {
         match error.api_code() {
             Some(ApiCode::Unauthenticated | ApiCode::InsufficientScope) => {
@@ -346,10 +432,10 @@ impl Account {
             }
             Some(ApiCode::UserSuspended) => self.wipe(ops, false)?,
             Some(ApiCode::MembershipInactive) => {
-                let personal = self.view().session.org_context.is_none();
-                if !personal {
-                    self.rotate(ops, Some("personal"), true)?;
-                }
+                // PI refuses this token family's organization from now on, refresh included;
+                // only a new sign-in (another organization or personal) gives a usable session.
+                self.remove_leases(None)?;
+                self.view_mut().reauth = true;
             }
             _ => {}
         }
@@ -357,7 +443,12 @@ impl Account {
     }
 
     pub(super) fn fetch_me(&self, ops: &mut Ops) -> Result<(), Error> {
-        let me: Me = self.api_get(ops, "/v1/me")?.json()?;
+        let url = self.cfg.pi_url("/me");
+        let me = me::parse(&self.api_get(ops, &url)?.body)?;
+        if me.locked {
+            self.wipe(ops, false)?;
+            return Err(account_locked());
+        }
         if !self.persistent {
             let mut view = self.view_mut();
             if view.session.org_context != me.org_context {
@@ -390,10 +481,10 @@ impl Account {
 
     pub(super) fn fetch_entitlements(&self, ops: &mut Ops) -> Result<(), Error> {
         let product = self.cfg.product;
-        let reply = self.api_get(
-            ops,
-            &format!("/v1/me/entitlements?product_id={}", product.id()),
-        )?;
+        let url = self
+            .cfg
+            .contract_url(&format!("/v1/me/entitlements?product_id={}", product.id()));
+        let reply = self.api_get(ops, &url)?;
         let org = self.view().session.org_context.clone();
         let list = entitlements::parse(&reply.body, product, org.as_deref())?;
         self.view_mut().entitlements = Some((list, self.mono()));
@@ -414,11 +505,9 @@ impl Account {
             return Ok(());
         }
         let product: Product = self.cfg.product;
-        let url = format!(
-            "{}/v1/products/{}/feature-catalog",
-            self.cfg.api(),
-            product.id()
-        );
+        let url = self
+            .cfg
+            .contract_url(&format!("/v1/products/{}/feature-catalog", product.id()));
         let reply = self
             .http
             .retrying(Retry::Idempotent, || self.http.get(&url, None))
@@ -454,6 +543,9 @@ impl Account {
         }
         self.access_token(ops)?;
         self.fetch_me(ops)?;
+        if !self.cfg.offline_licensing {
+            return Ok(());
+        }
         self.fetch_entitlements(ops)?;
         self.sync_licence(ops)
     }
@@ -474,4 +566,16 @@ fn profile(me: &Me) -> Profile {
         email: me.email.clone(),
         memberships: me.memberships.clone(),
     }
+}
+
+/// `/me` reporting a `LOCKED` account answers like PI's `403 ACCOUNT_LOCKED`.
+fn account_locked() -> Error {
+    Error::Api(ApiError {
+        status: 403,
+        code: ApiCode::UserSuspended,
+        correlation_id: None,
+        retry_after: None,
+        max_devices: None,
+        active_devices: None,
+    })
 }

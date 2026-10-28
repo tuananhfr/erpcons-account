@@ -13,7 +13,7 @@ use crate::{
     storage,
 };
 
-/// `session.json`. `profile` caches `GET /v1/me` so an offline start can show the user.
+/// `session.json`. `profile` caches PI's `/me` so an offline start can show the user.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct SessionFile {
     #[serde(default)]
@@ -32,6 +32,10 @@ pub(super) struct SessionFile {
     pub device_cap_reached: bool,
     #[serde(default)]
     pub profile: Option<Profile>,
+    /// Set by `sign_out`: PI's own browser session outlives it (12 h), so the next sign-in of any
+    /// of the four apps asks PI for `prompt=login`.
+    #[serde(default)]
+    pub login_prompt: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -341,9 +345,11 @@ impl Account {
         }
     }
 
-    /// Local sign-out of all four apps; `revoke` also calls the revocation endpoint (RFC 7009).
+    /// Local sign-out of all four apps; `revoke` (user sign-out) also calls the revocation
+    /// endpoint (RFC 7009) and makes the next sign-in send `prompt=login`.
     pub(super) fn wipe(&self, ops: &mut Ops, revoke: bool) -> Result<(), Error> {
         ops.access = None;
+        ops.login_prompt |= revoke;
         let result = if self.persistent {
             self.locked(ops, |ops| {
                 let token = self.refresh_token().ok().flatten();
@@ -363,6 +369,7 @@ impl Account {
                 if ops.device.is_some() {
                     let mut s = self.read_session_disk(ops).unwrap_or_default();
                     s.clear_identity();
+                    s.login_prompt |= revoke;
                     self.write_session(ops, &mut s, Floor::Max)?;
                 }
                 Ok(())
@@ -384,7 +391,7 @@ impl Account {
         result
     }
 
-    fn try_revoke(&self, ops: &mut Ops, token: &str) {
+    pub(super) fn try_revoke(&self, ops: &mut Ops, token: &str) {
         let outcome = self
             .discovery(ops)
             .and_then(|d| crate::oidc::revoke(&self.http, &d, &self.cfg.client_id, token));

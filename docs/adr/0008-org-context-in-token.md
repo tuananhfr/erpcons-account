@@ -1,6 +1,8 @@
 # ADR 0008: Organization context is a token claim, not a header
 
-Status: Proposed
+Status: Superseded by ADR 0011. The context is still the `org_context` claim, but PI selects it with
+`org_hint` on the authorization request only; its refresh grant cannot switch it, and the client
+reads it from `orgContext` of `GET /api/v1/id/me`.
 
 ## Context
 

@@ -40,6 +40,8 @@ fn main() -> ExitCode {
             "issuer": server.issuer(),
             "lease_kid": server.lease_key_id(),
             "lease_public_key_hex": hex,
+            "signing_kid": server.signing_key_id(),
+            "jwks_uri": server.jwks_uri(),
         })
     );
     server.wait();

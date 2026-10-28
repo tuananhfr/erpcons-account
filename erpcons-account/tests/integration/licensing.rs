@@ -5,7 +5,7 @@ use erpcons_account::{
 };
 use pi_mock::{Fault, LeaseTamper, ORG_A, ORG_B, Scenario};
 
-use crate::common::{DAY, Env, PRO, pro_scenario, sign_in, signed_in};
+use crate::common::{DAY, Env, PRO, browser, pro_scenario, sign_in, signed_in};
 
 fn licence(account: &erpcons_account::Account) -> LicenceState {
     signed_in(account.status()).licence
@@ -20,7 +20,7 @@ fn lease_id(account: &erpcons_account::Account) -> String {
 
 #[test]
 fn four_apps_share_one_device_with_one_lease_each() {
-    let env = Env::new(Scenario::default());
+    let env = Env::licensing(Scenario::default());
     let vanban = env.account();
     sign_in(&vanban);
     let bangtinh = env.account_for(Product::BangTinh);
@@ -42,7 +42,7 @@ fn four_apps_share_one_device_with_one_lease_each() {
 
 #[test]
 fn retry_after_timeout_reuses_the_idempotency_key() {
-    let env = Env::new(Scenario {
+    let env = Env::licensing(Scenario {
         faults: vec![Fault::delay("POST", "/v1/devices/activate", Duration::from_secs(3)).times(1)],
         ..Scenario::default()
     });
@@ -63,7 +63,7 @@ fn retry_after_timeout_reuses_the_idempotency_key() {
 
 #[test]
 fn device_cap_blocks_activation_until_user_retry() {
-    let env = Env::new(Scenario {
+    let env = Env::licensing(Scenario {
         max_devices: 0,
         ..Scenario::default()
     });
@@ -96,7 +96,7 @@ fn forged_or_mismatched_leases_are_rejected() {
         (LeaseTamper::CopyMismatch, VerifyError::CopyMismatch),
         (LeaseTamper::OverlongWindow, VerifyError::Validity),
     ] {
-        let env = Env::new(Scenario {
+        let env = Env::licensing(Scenario {
             lease_tamper: Some(tamper),
             ..Scenario::default()
         });
@@ -110,7 +110,7 @@ fn forged_or_mismatched_leases_are_rejected() {
 
 #[test]
 fn rejected_renewal_keeps_the_previous_lease() {
-    let env = Env::new(Scenario::default());
+    let env = Env::licensing(Scenario::default());
     let account = env.account();
     sign_in(&account);
     let first = lease_id(&account);
@@ -129,7 +129,7 @@ fn rejected_renewal_keeps_the_previous_lease() {
 
 #[test]
 fn expired_lease_denies_pro_and_keeps_free() {
-    let env = Env::new(pro_scenario(None, 7));
+    let env = Env::licensing(pro_scenario(None, 7));
     let account = env.account();
     sign_in(&account);
     assert!(account.allowed(PRO));
@@ -147,7 +147,7 @@ fn expired_lease_denies_pro_and_keeps_free() {
 
 #[test]
 fn clock_rollback_cannot_extend_a_lease() {
-    let env = Env::new(pro_scenario(None, 7));
+    let env = Env::licensing(pro_scenario(None, 7));
     let account = env.account();
     sign_in(&account);
     env.advance(8 * DAY);
@@ -163,7 +163,7 @@ fn clock_rollback_cannot_extend_a_lease() {
 
 #[test]
 fn expiry_warnings_at_7_3_1_days_once_each() {
-    let env = Env::new(pro_scenario(None, 30));
+    let env = Env::licensing(pro_scenario(None, 30));
     let account = env.account();
     sign_in(&account);
     assert_eq!(signed_in(account.status()).warning, None);
@@ -183,7 +183,7 @@ fn expiry_warnings_at_7_3_1_days_once_each() {
 fn no_warning_while_every_feature_is_free() {
     let mut scenario = pro_scenario(None, 30);
     scenario.catalogs.clear();
-    let env = Env::new(scenario);
+    let env = Env::licensing(scenario);
     let account = env.account();
     sign_in(&account);
     env.advance(29 * DAY);
@@ -192,7 +192,7 @@ fn no_warning_while_every_feature_is_free() {
 
 #[test]
 fn revoked_device_wipes_every_lease() {
-    let env = Env::new(Scenario::default());
+    let env = Env::licensing(Scenario::default());
     let account = env.account();
     sign_in(&account);
     let other = env.account_for(Product::Pdf);
@@ -216,28 +216,28 @@ fn revoked_device_wipes_every_lease() {
 
 #[test]
 fn switching_org_switches_entitlements() {
-    let env = Env::new(pro_scenario(Some(ORG_A), 30));
+    let env = Env::licensing(pro_scenario(Some(ORG_A), 30));
     let account = env.account();
     sign_in(&account);
     assert!(!account.allowed(PRO), "personal context holds nothing");
 
-    account.select_org(Some(ORG_A)).unwrap();
+    account.select_org(Some(ORG_A), browser).unwrap();
     let s = signed_in(account.status());
     assert_eq!(s.active_org.as_deref(), Some(ORG_A));
     assert!(matches!(&s.licence, LicenceState::Active { features, .. } if features == &[PRO]));
     assert!(account.allowed(PRO));
 
-    account.select_org(Some(ORG_B)).unwrap();
+    account.select_org(Some(ORG_B), browser).unwrap();
     assert!(
         matches!(&licence(&account), LicenceState::Active { features, .. } if features.is_empty())
     );
     assert!(!account.allowed(PRO));
 
     assert_eq!(
-        account.select_org(Some("org_unknown")),
+        account.select_org(Some("org_unknown"), browser),
         Err(Error::UnknownOrg)
     );
-    account.select_org(None).unwrap();
+    account.select_org(None, browser).unwrap();
     assert_eq!(signed_in(account.status()).active_org, None);
     // One device record per context: personal, A and B.
     assert_eq!(env.server.devices().len(), 3);
