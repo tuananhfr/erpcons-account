@@ -13,7 +13,7 @@ use super::{
     shared::{Floor, Profile, SessionFile, store_error},
 };
 use crate::{
-    ApiCode, ApiError, DESKTOP_SCOPES, Error, MembershipStatus, Product, catalog, entitlements,
+    ApiCode, ApiError, Error, MembershipStatus, Product, catalog, entitlements,
     http::{Body, Reply, Retry},
     loopback::{Loopback, Pages},
     me::{self, Me},
@@ -141,7 +141,7 @@ impl Account {
             &AuthorizeRequest {
                 client_id: &self.cfg.client_id,
                 redirect_uri: &redirect_uri,
-                scope: DESKTOP_SCOPES,
+                scope: self.cfg.profile.scopes,
                 state: &state,
                 nonce: &nonce,
                 code_challenge: &oidc::pkce_challenge(&verifier),

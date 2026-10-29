@@ -594,3 +594,26 @@ fn ubotbuild_builtin_defaults() {
         ]
     );
 }
+
+#[test]
+fn default_dirs_per_profile() {
+    fn last_two(p: std::path::PathBuf) -> Vec<String> {
+        let mut parts: Vec<String> = p
+            .components()
+            .rev()
+            .take(2)
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        parts.reverse();
+        parts
+    }
+    let ubot = last_two(crate::storage::default_dir(&crate::ClientProfile::UBOTCAD).unwrap());
+    let office = last_two(crate::storage::default_dir(&crate::ClientProfile::OFFICE).unwrap());
+    if cfg!(windows) || cfg!(target_os = "macos") {
+        assert_eq!(ubot, ["UbotCAD", "PI"]);
+        assert_eq!(office, ["ERPCons", "PI"]);
+    } else {
+        assert_eq!(ubot, ["ubotcad", "pi"]);
+        assert_eq!(office, ["erpcons", "pi"]);
+    }
+}

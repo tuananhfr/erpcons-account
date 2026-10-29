@@ -35,6 +35,8 @@ pub const ORG_A: &str = "0c9e7a51-3b2d-4c6f-8e1a-5d7b9f2c4e60";
 pub const ORG_B: &str = "a4d2f6b8-1e3c-4a5b-9c7d-8e0f2a4b6c81";
 
 pub const DESKTOP_CLIENT: &str = "erpcons-office-desktop";
+/// UbotCAD's desktop client; same scopes and loopback redirect as the Office one.
+pub const UBOTCAD_CLIENT: &str = "ubotcad-desktop";
 pub const WEB_CLIENT: &str = "erpcons-office-web";
 
 #[derive(Clone, Debug)]
@@ -250,6 +252,8 @@ pub enum LeaseTamper {
     CopyMismatch,
     /// `exp - iat` above 90 days.
     OverlongWindow,
+    /// `aud` of another client family.
+    WrongAudience,
 }
 
 /// A response injected for matching requests before normal handling.

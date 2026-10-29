@@ -33,16 +33,29 @@ pub trait SecretStore: Send + Sync {
 }
 
 /// Windows Credential Manager, macOS Keychain or Linux Secret Service, through `keyring`.
-#[derive(Debug, Default)]
-pub struct OsSecretStore;
+#[derive(Debug)]
+pub struct OsSecretStore {
+    service: &'static str,
+}
+
+impl Default for OsSecretStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl OsSecretStore {
     pub fn new() -> Self {
-        Self
+        Self::for_service(SERVICE)
     }
 
-    fn entry(name: &str) -> Result<keyring::Entry, StoreError> {
-        keyring::Entry::new(SERVICE, name).map_err(map_keyring)
+    /// Store under another credential service, one per client family.
+    pub fn for_service(service: &'static str) -> Self {
+        Self { service }
+    }
+
+    fn entry(&self, name: &str) -> Result<keyring::Entry, StoreError> {
+        keyring::Entry::new(self.service, name).map_err(map_keyring)
     }
 }
 
@@ -57,19 +70,17 @@ fn map_keyring(e: keyring::Error) -> StoreError {
 
 impl SecretStore for OsSecretStore {
     fn get(&self, entry: &str) -> Result<Option<String>, StoreError> {
-        match Self::entry(entry)?.get_password() {
+        match self.entry(entry)?.get_password() {
             Ok(s) => Ok(Some(s)),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(e) => Err(map_keyring(e)),
         }
     }
     fn set(&self, entry: &str, secret: &str) -> Result<(), StoreError> {
-        Self::entry(entry)?
-            .set_password(secret)
-            .map_err(map_keyring)
+        self.entry(entry)?.set_password(secret).map_err(map_keyring)
     }
     fn delete(&self, entry: &str) -> Result<(), StoreError> {
-        match Self::entry(entry)?.delete_credential() {
+        match self.entry(entry)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(map_keyring(e)),
         }

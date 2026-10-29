@@ -45,7 +45,7 @@ them off the UI thread. `reload()` re-reads the session shared by the four apps 
 `select_org(Some(id), open_browser)` / `select_org(None, open_browser)` switches organization
 context by running PI's authorization again (`org_hint`, or `prompt=select_account` to pick
 personal; ADR 0011), `sign_out()` revokes
-and clears the shared session. The secret store is the OS keyring (service `ERPCons Office PI`);
+and clears the shared session. The secret store is the OS keyring (service `ERPCons Office PI`, or the profile's);
 when it is unavailable the session lives in memory only and `Status` reports `session_only`.
 
 `Config::api_base` is the base of PI's end-user API (default `{issuer}/api/v1/id`). With
@@ -55,6 +55,15 @@ called and `pro` features are denied; turning it on targets the Office contract'
 
 Release builds pin `PLATFORM_KEYS` in `src/config.rs`; it is empty until PI publishes its
 signing keys. Tests and E2E runs set `Config::platform_keys` to the mock's key.
+
+### Client families
+
+`Config::new(issuer, product, version)` picks a `ClientProfile` from the product. `ClientProfile::OFFICE`
+(the four Office apps) keeps client `erpcons-office-desktop`, keyring service `ERPCons Office PI`
+and state directory `ERPCons\PI` (macOS `ERPCons/PI`, Linux `erpcons/pi`). `ClientProfile::UBOTCAD`
+(`Product::UbotBuild`, feature ids `ubotbuild.cad.*`) uses client `ubotcad-desktop`, service
+`UbotCAD PI` and `UbotCAD\PI` (`UbotCAD/PI`, `ubotcad/pi`), so the two families never share a
+session, device key or lease. `Account::with_os_store` takes the service and directory from the profile.
 
 On Linux the credential store is the Secret Service, reached through zbus (pure Rust): builds need no libdbus.
 

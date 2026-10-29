@@ -7,7 +7,7 @@ use std::{
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 
-use crate::{Error, Product, jose};
+use crate::{ClientProfile, Error, Product, jose};
 
 const MAX_FILE: u64 = 64 << 10;
 
@@ -47,21 +47,25 @@ impl Paths {
     }
 }
 
-/// Windows `%APPDATA%\ERPCons\PI`, macOS `~/Library/Application Support/ERPCons/PI`,
-/// Linux `$XDG_CONFIG_HOME/erpcons/pi` (default `~/.config/erpcons/pi`).
-pub(crate) fn default_dir() -> Option<PathBuf> {
+/// Windows `%APPDATA%\<dir_windows>` (`ERPCons\PI`), macOS `~/Library/Application Support/<dir_macos>`,
+/// Linux `$XDG_CONFIG_HOME/<dir_linux>` (default `~/.config/...`).
+pub(crate) fn default_dir(profile: &ClientProfile) -> Option<PathBuf> {
     let env = |k: &str| {
         std::env::var_os(k)
             .map(PathBuf::from)
             .filter(|p| p.is_absolute())
     };
     if cfg!(windows) {
-        Some(env("APPDATA")?.join("ERPCons").join("PI"))
+        Some(env("APPDATA")?.join(profile.dir_windows))
     } else if cfg!(target_os = "macos") {
-        Some(env("HOME")?.join("Library/Application Support/ERPCons/PI"))
+        Some(
+            env("HOME")?
+                .join("Library/Application Support")
+                .join(profile.dir_macos),
+        )
     } else {
         let config = env("XDG_CONFIG_HOME").or_else(|| Some(env("HOME")?.join(".config")))?;
-        Some(config.join("erpcons").join("pi"))
+        Some(config.join(profile.dir_linux))
     }
 }
 

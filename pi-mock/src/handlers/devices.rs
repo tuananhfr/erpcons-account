@@ -160,6 +160,7 @@ pub(super) fn activate(st: &mut State, ctx: &Ctx, req: &Req, auth: &Auth) -> Res
                 user_id: auth.user_id.clone(),
                 org: auth.org.clone(),
                 jkt: jkt.clone(),
+                client_id: auth.client_id.clone(),
                 revoked: false,
                 products: Vec::new(),
             });
@@ -257,7 +258,7 @@ fn lease_response(
     let lease_id = st.next_id("lse");
     let mut claims = json!({
         "iss": ctx.issuer,
-        "aud": "erpcons-office-desktop",
+        "aud": device.client_id,
         "lease_id": lease_id,
         "sub": device.user_id,
         "org": device.org,
@@ -296,6 +297,7 @@ fn lease_response(
         Some(LeaseTamper::WrongNonce) => claims["nonce"] = crypto::token().into(),
         Some(LeaseTamper::WrongIssuer) => claims["iss"] = "https://evil.invalid".into(),
         Some(LeaseTamper::OverlongWindow) => claims["exp"] = (now + 91 * DAY).into(),
+        Some(LeaseTamper::WrongAudience) => claims["aud"] = "erpcons-office-desktop".into(),
         _ => {}
     }
     let header = json!({ "alg": "EdDSA", "kid": kid, "typ": "pi-lease+jwt" });

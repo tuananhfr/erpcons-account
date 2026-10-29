@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     Fault, FaultAction, Scenario,
-    scenario::{Client, DESKTOP_CLIENT, Membership, User, WEB_CLIENT},
+    scenario::{Client, DESKTOP_CLIENT, Membership, UBOTCAD_CLIENT, User, WEB_CLIENT},
 };
 
 /// PI `IdMeta`: authorization code 60 s, refresh token 30 days (sliding).
@@ -43,6 +43,8 @@ pub(crate) struct Auth {
     pub user_id: String,
     pub org: Option<String>,
     pub scope: String,
+    /// `azp` of the access token.
+    pub client_id: String,
 }
 
 pub(crate) struct NonceRecord {
@@ -63,6 +65,8 @@ pub struct DeviceRecord {
     pub user_id: String,
     pub org: Option<String>,
     pub jkt: String,
+    /// Client that activated the device; the `aud` of its leases.
+    pub client_id: String,
     pub revoked: bool,
     pub products: Vec<String>,
 }
@@ -143,13 +147,18 @@ impl State {
         self.counter
     }
 
-    /// The two Office clients of decision 1, then the scenario's extra clients.
+    /// The two Office clients of decision 1, UbotCAD's desktop client, then the scenario's extra clients.
     pub(crate) fn clients(&self) -> Vec<Client> {
         let mut web = Client::new(WEB_CLIENT, &[], WEB_SCOPES);
         web.redirect_uris = self.scenario.web_redirect_uris.clone();
         let mut all = vec![
             Client::new(
                 DESKTOP_CLIENT,
+                &["http://127.0.0.1/callback"],
+                DESKTOP_SCOPES,
+            ),
+            Client::new(
+                UBOTCAD_CLIENT,
                 &["http://127.0.0.1/callback"],
                 DESKTOP_SCOPES,
             ),

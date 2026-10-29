@@ -27,8 +27,8 @@ use std::{
 
 pub use scenario::{
     Authorize, Catalog, Client, DEFAULT_USER, DESKTOP_CLIENT, DEV_LEASE_KID, DEV_SIGNING_KID,
-    Entitlement, Fault, FaultAction, JwtKey, LeaseTamper, Membership, ORG_A, ORG_B, Scenario, User,
-    WEB_CLIENT, dev_lease_public_key, dev_lease_seed, dev_signing_seed,
+    Entitlement, Fault, FaultAction, JwtKey, LeaseTamper, Membership, ORG_A, ORG_B, Scenario,
+    UBOTCAD_CLIENT, User, WEB_CLIENT, dev_lease_public_key, dev_lease_seed, dev_signing_seed,
 };
 pub use state::{DeviceRecord, RecordedRequest};
 

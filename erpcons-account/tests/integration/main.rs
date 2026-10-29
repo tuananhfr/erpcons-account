@@ -4,3 +4,4 @@ mod licensing;
 mod pi;
 mod session;
 mod sign_in;
+mod ubotcad;

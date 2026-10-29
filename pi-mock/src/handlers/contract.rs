@@ -11,7 +11,7 @@ use crate::{
     state::State,
 };
 
-pub(crate) const PRODUCTS: [&str; 4] = ["vanban", "bangtinh", "trinhchieu", "pdf"];
+pub(crate) const PRODUCTS: [&str; 5] = ["vanban", "bangtinh", "trinhchieu", "pdf", "ubotbuild"];
 
 /// Entitlements in force for `user` in `org` (personal ones always, plus the org's).
 pub(crate) fn effective<'a>(

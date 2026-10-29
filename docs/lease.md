@@ -78,7 +78,7 @@ Header: `alg` `EdDSA`, `kid`, `typ` `pi-lease+jwt`.
 | Claim | Type | Meaning | Client check (§9) |
 |---|---|---|---|
 | `iss` | string | Platform issuer URL (the OIDC issuer) | Equals the pinned issuer |
-| `aud` | string | `erpcons-office-desktop` | Equals |
+| `aud` | string | The client id of the family that activated the device: `erpcons-office-desktop` (Office) or `ubotcad-desktop` (UbotCAD) | Equals the app's `client_id` |
 | `lease_id` | string | Unique id of this lease | Present; logged |
 | `sub` | string | `user_id` | Equals the signed-in user's `user_id` |
 | `org` | string or `null` | `org_context` at issue; `null` = personal | Equals the current `org_context` |
@@ -187,7 +187,7 @@ On receipt (200 from activate, or 200 `status: active` from refresh):
 3. Strict signature check with the pinned key over the ASCII bytes `header_b64 "." payload_b64`.
    Nothing from the payload is used before this step.
 4. Payload: one JSON object, no duplicate members, every claim of §4 present with its type.
-5. `iss` = pinned issuer; `aud` = `erpcons-office-desktop`.
+5. `iss` = pinned issuer; `aud` = the app's client id (`erpcons-office-desktop` for Office, `ubotcad-desktop` for UbotCAD).
 6. `product` = the app's product id; every `features` entry matches `<product>.<name>`.
 7. `sub` = signed-in `user_id`; `org` = current `org_context`.
 8. `installation_id` = local value; `cnf.jkt` = thumbprint of the local device public key.

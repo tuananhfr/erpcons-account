@@ -231,7 +231,13 @@ impl Account {
 
     /// Deletes every lease file except `keep`'s.
     pub(super) fn remove_leases(&self, keep: Option<Product>) -> Result<(), Error> {
-        for p in Product::OFFICE.into_iter().filter(|p| Some(*p) != keep) {
+        for &p in self
+            .cfg
+            .profile
+            .products
+            .iter()
+            .filter(|p| Some(**p) != keep)
+        {
             storage::remove(&self.paths.lease(p))?;
         }
         let mut view = self.view_mut();
@@ -296,11 +302,11 @@ impl Account {
         Ok(Some(slot))
     }
 
-    /// Loads the four lease files (lease.md §9 on load). Only this app's invalid lease is deleted.
+    /// Loads the lease file of every product of this client family (lease.md §9 on load). Only this app's invalid lease is deleted.
     pub(super) fn load_leases(&self, ops: &mut Ops) -> Result<(), Error> {
         let mut leases = std::collections::BTreeMap::new();
         let mut invalid_own = false;
-        for p in Product::OFFICE {
+        for &p in self.cfg.profile.products {
             match self.read_lease(ops, p)? {
                 Some(Ok(slot)) => {
                     leases.insert(p, slot);

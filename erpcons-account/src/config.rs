@@ -243,10 +243,8 @@ impl Config {
             max_retry_wait: Duration::from_secs(10),
             offline_licensing: false,
             sign_in_timeout: Duration::from_secs(600),
-            callback_success_html: "<!doctype html><meta charset=\"utf-8\"><title>ERPCons</title>"
-                .into(),
-            callback_failure_html: "<!doctype html><meta charset=\"utf-8\"><title>ERPCons</title>"
-                .into(),
+            callback_success_html: callback_page(profile.app_title),
+            callback_failure_html: callback_page(profile.app_title),
             clock: Arc::new(SystemClock::new()),
         }
     }
@@ -286,6 +284,10 @@ impl Config {
         }
         Ok(())
     }
+}
+
+fn callback_page(title: &str) -> String {
+    format!("<!doctype html><meta charset=\"utf-8\"><title>{title}</title>")
 }
 
 fn valid_version(v: &str) -> bool {

@@ -89,7 +89,7 @@ impl Account {
         let dir = config
             .state_dir
             .clone()
-            .or_else(storage::default_dir)
+            .or_else(|| storage::default_dir(&config.profile))
             .ok_or_else(|| Error::Config("no shared PI directory".into()))?;
         let persistent = match store.get(DEVICE_ENTRY) {
             Err(StoreError::Unavailable(e)) => {
@@ -124,7 +124,8 @@ impl Account {
 
     /// [`Account::new`] with the OS credential store.
     pub fn with_os_store(config: Config) -> Result<Self, Error> {
-        Self::new(config, Arc::new(OsSecretStore::new()))
+        let store = OsSecretStore::for_service(config.profile.keyring_service);
+        Self::new(config, Arc::new(store))
     }
 
     pub fn status(&self) -> Status {
@@ -138,9 +139,12 @@ impl Account {
         let now = self.effective_now();
         let s = &view.session;
         let profile = s.profile.as_ref();
-        let licences: BTreeMap<Product, LicenceState> = Product::OFFICE
-            .into_iter()
-            .map(|p| (p, self.licence(&view, p, now)))
+        let licences: BTreeMap<Product, LicenceState> = self
+            .cfg
+            .profile
+            .products
+            .iter()
+            .map(|&p| (p, self.licence(&view, p, now)))
             .collect();
         Status::SignedIn(Box::new(SignedIn {
             user: s.user_id.as_ref().zip(profile).map(|(id, p)| User {

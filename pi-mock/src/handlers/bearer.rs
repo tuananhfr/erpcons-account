@@ -89,5 +89,6 @@ pub(crate) fn check(st: &State, req: &Req, scope: &str, lenient: bool) -> Result
         user_id: user_id.to_owned(),
         org,
         scope: granted.to_owned(),
+        client_id: claims["azp"].as_str().unwrap_or_default().to_owned(),
     })
 }
