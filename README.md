@@ -9,10 +9,11 @@ user: one sign-in, one registered device per machine, one lease per product (ADR
 ERPCons Office is a consumer of the PI Platform (HS05: product teams do not build
 IAM). The library was first written against the contract in `docs/`, before PI existed. It now
 talks to the real PI Platform (PI ID): PI's paths, `/api/v1/id/me`, its error envelope,
-organization switching with `org_hint`; offline licensing (device activation, leases, the
-entitlement list and the signed catalog) is kept but turned off by `Config::offline_licensing`.
+organization switching with `org_hint`; offline licensing (device activation and leases) speaks PI's
+device protocol (ADR 0012) and is turned off for Office by `Config::offline_licensing`.
 **Where this README, the contract or ADRs 0004/0008 differ from
-[ADR 0011](docs/adr/0011-real-pi-platform.md), ADR 0011 wins.**
+[ADR 0011](docs/adr/0011-real-pi-platform.md) or [ADR 0012](docs/adr/0012-pi-device-protocol.md),
+those ADRs win.**
 
 The crate follows the style of `../erpcons-update`: a blocking library, `ureq`,
 Ed25519 verification with pinned keys, typed errors, no UI text. Forks pin it by git tag.
@@ -49,9 +50,11 @@ and clears the shared session. The secret store is the OS keyring (service `ERPC
 when it is unavailable the session lives in memory only and `Status` reports `session_only`.
 
 `Config::api_base` is the base of PI's end-user API (default `{issuer}/api/v1/id`). With
-`Config::offline_licensing` off (the default) no device, lease, entitlement or catalog endpoint is
-called and `pro` features are denied; turning it on targets the Office contract's `/v1/` endpoints
-(pi-mock), not PI, whose device protocol differs (ADR 0011).
+`Config::offline_licensing` off (the default) no device, lease or entitlement endpoint is called and
+`pro` features are denied. Turned on, the client uses PI's device protocol (`/devices/challenge`,
+`/devices/activate`, `/licenses/refresh`, `/me/entitlements`; ADR 0012) and only in an organization
+context; PI has no Office product, so this is for UbotCAD (`ubotbuild`). The feature catalog is not
+fetched.
 
 Release builds pin `PLATFORM_KEYS` in `src/config.rs`; it is empty until PI publishes its
 signing keys. Tests and E2E runs set `Config::platform_keys` to the mock's key.
@@ -61,7 +64,7 @@ signing keys. Tests and E2E runs set `Config::platform_keys` to the mock's key.
 `Config::new(issuer, product, version)` picks a `ClientProfile` from the product. `ClientProfile::OFFICE`
 (the four Office apps) keeps client `erpcons-office-desktop`, keyring service `ERPCons Office PI`
 and state directory `ERPCons\PI` (macOS `ERPCons/PI`, Linux `erpcons/pi`). `ClientProfile::UBOTCAD`
-(`Product::UbotBuild`, feature ids `ubotbuild.cad.*`) uses client `ubotcad-desktop`, service
+(`Product::UbotBuild`, feature ids `ubotbuild.cad-view|cad-export|cad-use`) uses client `ubotcad-desktop`, service
 `UbotCAD PI` and `UbotCAD\PI` (`UbotCAD/PI`, `ubotcad/pi`), so the two families never share a
 session, device key or lease. `Account::with_os_store` takes the service and directory from the profile.
 
@@ -75,8 +78,8 @@ In tests:
 let server = pi_mock::Server::start(pi_mock::Scenario::default());
 let mut config = Config::new(server.issuer(), Product::VanBan, "1.0.0");
 config.platform_keys = vec![PinnedKey { kid: server.lease_key_id(), key: server.lease_public_key() }];
-config.offline_licensing = true; // only to test the licensing code against pi-mock's /v1/ endpoints
-server.update_scenario(|s| s.entitlements.clear()); // or set_scenario, add_fault, revoke_device...
+config.offline_licensing = true; // exercises PI's device protocol served by pi-mock
+server.update_scenario(|s| s.tenants.clear()); // or set_scenario, add_fault, revoke_device...
 ```
 
 As a process: `cargo run -p pi-mock -- --port 8787 [--host 0.0.0.0] [--issuer URL]
@@ -84,7 +87,7 @@ As a process: `cargo run -p pi-mock -- --port 8787 [--host 0.0.0.0] [--issuer UR
 public key (hex), signing `kid` and JWKS URI. pi-mock behaves like PI's code (ADR 0011): `/id/*`
 OIDC endpoints, EdDSA access and ID tokens published at `/id/jwks.json`, `org_hint` and the
 organization page (`Scenario::org_choice`), `/api/v1/id/me`, PI's envelope and CORS rules. Its
-Office-contract licensing endpoints under `/v1/` are not PI's. The signing and lease keys are fixed
+device endpoints follow PI's device protocol (`Scenario::tenants`). The signing and lease keys are fixed
 development keys derived from public labels; release builds never pin them.
 
 ## Checks
