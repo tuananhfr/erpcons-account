@@ -125,6 +125,13 @@ impl Resp {
         Self::json(status, &body)
     }
 
+    /// PI's 422 (`ApiException::validation`): per-field `errors`, no `code`.
+    pub(crate) fn pi_invalid(errors: Value) -> Self {
+        let mut body = json!({ "ok": false, "message": "Dữ liệu chưa hợp lệ." });
+        body["errors"] = errors;
+        Self::json(422, &body)
+    }
+
     /// `ApiExceptionSubscriber`'s message for a status without a business message.
     pub(crate) fn pi_status(status: u16) -> Self {
         let message = match status {

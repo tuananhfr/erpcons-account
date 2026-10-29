@@ -1,7 +1,8 @@
 //! Mock of the real PI Platform (`pi_id`) as ERPCons Office uses it (ADR 0011): OIDC discovery,
 //! PKCE S256 authorization with `org_hint`, EdDSA access and ID tokens with `/id/jwks.json`,
 //! refresh rotation with family revocation on reuse, and `/api/v1/id/me` in PI's envelope.
-//! It also keeps the Office contract's licensing endpoints under `/v1/` (entitlements, signed
+//! It serves PI's device protocol (`/api/v1/id/devices/*`, `licenses/refresh`, `me/entitlements`,
+//! `/id/lease-keys.json`) and also keeps the Office contract's licensing endpoints under `/v1/` (entitlements, signed
 //! feature catalogs, device activation, leases), which PI does not have, so the licensing code
 //! behind `Config::offline_licensing` stays testable. In-process for tests, or the `pi-mock`
 //! binary for manual and E2E runs.
@@ -27,10 +28,11 @@ use std::{
 
 pub use scenario::{
     Authorize, Catalog, Client, DEFAULT_USER, DESKTOP_CLIENT, DEV_LEASE_KID, DEV_SIGNING_KID,
-    Entitlement, Fault, FaultAction, JwtKey, LeaseTamper, Membership, ORG_A, ORG_B, Scenario,
-    UBOTCAD_CLIENT, User, WEB_CLIENT, dev_lease_public_key, dev_lease_seed, dev_signing_seed,
+    Entitlement, FREE_UBOTCAD, Fault, FaultAction, JwtKey, LeaseTamper, Membership, ORG_A, ORG_B,
+    Scenario, Tenant, UBOTCAD_CLIENT, User, WEB_CLIENT, dev_lease_public_key, dev_lease_seed,
+    dev_signing_seed,
 };
-pub use state::{DeviceRecord, RecordedRequest};
+pub use state::{DeviceRecord, DeviceRow, DeviceStatus, RecordedRequest};
 
 use http::Req;
 use state::State;
@@ -214,11 +216,21 @@ impl Server {
         self.shared.state().devices.clone()
     }
 
+    /// Devices activated through PI's protocol.
+    pub fn device_rows(&self) -> Vec<DeviceRow> {
+        self.shared.state().pi_devices.clone()
+    }
+
     /// Revokes a device as an admin would; its next lease refresh reports `device_revoked`.
     pub fn revoke_device(&self, device_id: &str) -> bool {
         let mut state = self.shared.state();
-        let found = state.devices.iter_mut().find(|d| d.device_id == device_id);
-        found.map(|d| d.revoked = true).is_some()
+        let record = state.devices.iter_mut().find(|d| d.device_id == device_id);
+        let record = record.map(|d| d.revoked = true).is_some();
+        let row = state
+            .pi_devices
+            .iter_mut()
+            .find(|d| d.device_id == device_id);
+        row.map(|d| d.status = DeviceStatus::Revoked).is_some() || record
     }
 
     /// True if `refresh_token` belongs to a family revoked by reuse detection or revocation.
@@ -284,6 +296,8 @@ fn serve(shared: &Shared, mut request: tiny_http::Request) {
     let mut response = tiny_http::Response::from_data(resp.body.clone())
         .with_status_code(tiny_http::StatusCode(resp.status));
     let mut headers = resp.headers.clone();
+    let now = shared.state().now();
+    headers.push(("Date".into(), crypto::http_date(now)));
     let api = req.path.starts_with(handlers::API_PREFIX);
     let contract = req.path.starts_with(handlers::CONTRACT_PREFIX);
     if api || contract {

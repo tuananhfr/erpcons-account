@@ -48,6 +48,10 @@ pub struct Scenario {
     /// What the user picks on PI's organization page: an `org_id`, or `None` for "personal".
     pub org_choice: Option<String>,
     pub entitlements: Vec<Entitlement>,
+    /// PI tenants (organization x product) served by the device protocol under `/api/v1/id/`.
+    pub tenants: Vec<Tenant>,
+    /// PI's product registry (`ProductRegistry`); other codes are 422 on its device endpoints.
+    pub products: Vec<String>,
     /// Signed catalogs; a product without one gets version 1 with every feature free.
     pub catalogs: Vec<Catalog>,
     /// Device cap per user and organization context.
@@ -88,6 +92,21 @@ impl Default for Scenario {
             authorize: Authorize::Approve,
             org_choice: None,
             entitlements: Vec::new(),
+            tenants: Vec::new(),
+            products: [
+                "erpcons",
+                "tekshot",
+                "ubotbuild",
+                "corporatehealth",
+                "digitalhealth",
+                "lpcvn",
+                "erpconsvn",
+                "aloubot",
+                "ubotconnect",
+                "ubotview",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
             catalogs: Vec::new(),
             max_devices: 3,
             now: None,
@@ -217,6 +236,63 @@ impl Entitlement {
     }
 }
 
+/// Features of the UbotBuild free plan (`UbotbuildMeta`); `offline` is PI-internal.
+pub const FREE_UBOTCAD: [&str; 4] = ["cad-view", "cad-export", "cad-use", "offline"];
+
+/// A PI tenant: an organization's subscription to a product, with its device policy.
+#[derive(Clone, Debug)]
+pub struct Tenant {
+    pub tenant_id: String,
+    pub org_id: String,
+    pub product_id: String,
+    pub features: Vec<String>,
+    /// Lease lifetime in days when `features` has `offline`.
+    pub offline_days: u32,
+    pub device_cap: usize,
+    /// Accounts holding a seat; `None` is an unlimited plan that grants seats on demand.
+    pub seats: Option<Vec<String>>,
+    /// End of the subscription (Unix seconds); leases never outlive it.
+    pub valid_to: Option<i64>,
+    /// `<planCode>@<planVersion>`, the lease `policy_version`.
+    pub plan: String,
+}
+
+impl Tenant {
+    pub fn new(tenant_id: &str, org_id: &str, product_id: &str, features: &[&str]) -> Self {
+        Self {
+            tenant_id: tenant_id.into(),
+            org_id: org_id.into(),
+            product_id: product_id.into(),
+            features: features.iter().map(|f| f.to_string()).collect(),
+            offline_days: 7,
+            device_cap: 2,
+            seats: None,
+            valid_to: None,
+            plan: "ubb-mien-phi@1".into(),
+        }
+    }
+
+    pub fn offline_days(mut self, days: u32) -> Self {
+        self.offline_days = days;
+        self
+    }
+
+    pub fn device_cap(mut self, cap: usize) -> Self {
+        self.device_cap = cap;
+        self
+    }
+
+    pub fn seats(mut self, accounts: &[&str]) -> Self {
+        self.seats = Some(accounts.iter().map(|a| a.to_string()).collect());
+        self
+    }
+
+    pub fn valid_to(mut self, t: i64) -> Self {
+        self.valid_to = Some(t);
+        self
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Catalog {
     pub product_id: String,
@@ -254,6 +330,10 @@ pub enum LeaseTamper {
     OverlongWindow,
     /// `aud` of another client family.
     WrongAudience,
+    /// PI lease with an uppercase, invalid feature code.
+    BadFeatureCode,
+    /// PI lease without `aud`.
+    MissingAudience,
 }
 
 /// A response injected for matching requests before normal handling.

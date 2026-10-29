@@ -5,6 +5,7 @@ pub(crate) mod bearer;
 mod contract;
 mod devices;
 mod oidc;
+mod pi_devices;
 
 use std::time::Duration;
 
@@ -115,6 +116,11 @@ fn route(st: &mut State, ctx: &Ctx, req: &Req) -> Resp {
         ("GET", "/id/userinfo") => oidc::userinfo(st, req),
         ("GET", "/id/logout") => oidc::logout(st, req),
         ("GET", "/api/v1/id/me") => api::me(st, req),
+        ("GET", "/id/lease-keys.json") => pi_devices::lease_keys(st),
+        ("GET", "/api/v1/id/devices/challenge") => pi_devices::challenge(st, req),
+        ("POST", "/api/v1/id/devices/activate") => pi_devices::activate(st, ctx, req),
+        ("POST", "/api/v1/id/licenses/refresh") => pi_devices::refresh(st, ctx, req),
+        ("GET", "/api/v1/id/me/entitlements") => pi_devices::entitlements(st, req),
         ("GET", "/v1/me/entitlements") => contract::entitlements(st, ctx, req),
         ("GET", p) if p.starts_with("/v1/products/") && p.ends_with("/feature-catalog") => {
             contract::catalog(st, ctx, p)

@@ -71,6 +71,36 @@ pub struct DeviceRecord {
     pub products: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceStatus {
+    Active,
+    Revoked,
+}
+
+/// A device of PI's protocol, one per (`installation_id`, `product`, account).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceRow {
+    pub device_id: String,
+    pub installation_id: String,
+    pub product: String,
+    pub user_id: String,
+    pub org: String,
+    pub public_key: [u8; 32],
+    /// Client that activated the device; the `aud` of its leases.
+    pub client_id: String,
+    pub status: DeviceStatus,
+    pub last_refresh_ts: i64,
+}
+
+/// A challenge of `GET /devices/challenge`, bound to (account, product) as in PI.
+pub(crate) struct Challenge {
+    pub nonce: String,
+    pub user_id: String,
+    pub product: String,
+    pub expires: i64,
+    pub used: bool,
+}
+
 /// A request as the mock received it (for header and privacy assertions).
 #[derive(Clone, Debug)]
 pub struct RecordedRequest {
@@ -102,6 +132,8 @@ pub(crate) struct State {
     pub revoked_families: HashSet<u64>,
     pub nonces: HashMap<String, NonceRecord>,
     pub devices: Vec<DeviceRecord>,
+    pub pi_devices: Vec<DeviceRow>,
+    pub challenges: HashMap<String, Challenge>,
     pub idempotency: HashMap<(String, String, String), Idempotency>,
     pub requests: Vec<RecordedRequest>,
     pub counter: u64,
@@ -118,6 +150,8 @@ impl State {
             revoked_families: HashSet::new(),
             nonces: HashMap::new(),
             devices: Vec::new(),
+            pi_devices: Vec::new(),
+            challenges: HashMap::new(),
             idempotency: HashMap::new(),
             requests: Vec::new(),
             counter: 0,
@@ -151,17 +185,19 @@ impl State {
     pub(crate) fn clients(&self) -> Vec<Client> {
         let mut web = Client::new(WEB_CLIENT, &[], WEB_SCOPES);
         web.redirect_uris = self.scenario.web_redirect_uris.clone();
+        let mut ubotcad = Client::new(
+            UBOTCAD_CLIENT,
+            &["http://127.0.0.1/callback"],
+            DESKTOP_SCOPES,
+        );
+        ubotcad.product = Some("ubotbuild".into());
         let mut all = vec![
             Client::new(
                 DESKTOP_CLIENT,
                 &["http://127.0.0.1/callback"],
                 DESKTOP_SCOPES,
             ),
-            Client::new(
-                UBOTCAD_CLIENT,
-                &["http://127.0.0.1/callback"],
-                DESKTOP_SCOPES,
-            ),
+            ubotcad,
             web,
         ];
         all.extend(self.scenario.extra_clients.iter().cloned());
