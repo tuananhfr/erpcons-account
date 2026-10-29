@@ -84,7 +84,7 @@ impl Product {
     /// Feature names (after `<product>.`) that stay free whatever a catalog says.
     pub fn pinned_free_suffixes(self) -> &'static [&'static str] {
         match self {
-            Self::UbotBuild => &["cad.view", "cad.export"],
+            Self::UbotBuild => &["cad-view", "cad-export"],
             _ => &["view", "export"],
         }
     }
@@ -178,7 +178,7 @@ pub struct Config {
     pub client_id: String,
     pub profile: ClientProfile,
     pub product: Product,
-    /// App version `major.minor.patch`, sent as `client_version`.
+    /// App version `major.minor.patch`, sent as `clientVersion` at activation.
     pub client_version: String,
     pub user_agent: String,
     pub platform: Platform,
@@ -194,9 +194,9 @@ pub struct Config {
     pub timeout: Duration,
     /// Longest wait a call spends on its own retries before returning the error.
     pub max_retry_wait: Duration,
-    /// Device activation, offline leases, online entitlements and the signed feature catalog of
-    /// the Office contract (ADR 0003, 0009). PI serves none of them in that form yet, so they stay
-    /// off and none of their endpoints is called (ADR 0011).
+    /// Device activation, offline leases and online entitlements through PI's device protocol
+    /// (ADR 0012). Off by default: none of their endpoints is called. UbotCAD turns it on; PI has
+    /// no Office product, so Office keeps it off.
     pub offline_licensing: bool,
     /// How long `sign_in` and `select_org` wait for the browser callback.
     pub sign_in_timeout: Duration,
@@ -255,11 +255,6 @@ impl Config {
             Some(base) => format!("{}{path}", base.trim_end_matches('/')),
             None => format!("{}{PI_API_PATH}{path}", self.issuer.trim_end_matches('/')),
         }
-    }
-
-    /// URL of an Office-contract `path` (`/v1/...`); only pi-mock serves these (ADR 0011).
-    pub(crate) fn contract_url(&self, path: &str) -> String {
-        format!("{}{path}", self.issuer.trim_end_matches('/'))
     }
 
     pub(crate) fn validate(&self) -> Result<(), crate::Error> {

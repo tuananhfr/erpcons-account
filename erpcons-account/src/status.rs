@@ -75,6 +75,9 @@ pub enum LicenceState {
     DeviceRevoked,
     /// Device cap reached; activation waits for a user retry.
     DeviceCapReached,
+    /// The organization has no plan or seat for this product. No activation until sign-in, an
+    /// organization switch, a user retry, or PI's entitlements granting the product again.
+    NotEntitled,
     /// No OS credential store: `pro` features use the online path only.
     SessionOnly,
 }

@@ -2,7 +2,6 @@
 //! `aud`, then account status, route scope and the token's organization, in that order.
 use serde_json::Value;
 
-use super::Ctx;
 use crate::{
     http::{Req, Resp},
     jwt,
@@ -39,21 +38,9 @@ impl Denied {
             ),
         }
     }
-
-    /// RFC 9457 problem of the Office contract, for its `/v1/` endpoints.
-    pub(crate) fn problem(&self, ctx: &Ctx) -> Resp {
-        match self {
-            Self::Unauthenticated => ctx.problem(401, "unauthenticated"),
-            Self::Locked => ctx.problem(403, "user_suspended"),
-            Self::Scope(_) => ctx.problem(403, "insufficient_scope"),
-            Self::Membership => ctx.problem(403, "membership_inactive"),
-        }
-    }
 }
 
-/// `lenient` skips the account and membership checks, which the contract's lease refresh
-/// reports as `status: revoked` instead.
-pub(crate) fn check(st: &State, req: &Req, scope: &str, lenient: bool) -> Result<Auth, Denied> {
+pub(crate) fn check(st: &State, req: &Req, scope: &str) -> Result<Auth, Denied> {
     let token = req
         .header("Authorization")
         .and_then(|h| h.strip_prefix("Bearer "))
@@ -70,7 +57,7 @@ pub(crate) fn check(st: &State, req: &Req, scope: &str, lenient: bool) -> Result
         .filter(|_| audience_ok)
         .ok_or(Denied::Unauthenticated)?;
     let user = st.user(user_id).ok_or(Denied::Unauthenticated)?;
-    if user.suspended && !lenient {
+    if user.suspended {
         return Err(Denied::Locked);
     }
     let granted = claims["scope"].as_str().unwrap_or_default();
@@ -78,10 +65,9 @@ pub(crate) fn check(st: &State, req: &Req, scope: &str, lenient: bool) -> Result
         return Err(Denied::Scope(scope.to_owned()));
     }
     let org = claims["org_context"].as_str().map(str::to_owned);
-    if !lenient
-        && org
-            .as_deref()
-            .is_some_and(|o| !st.membership_active(user_id, o))
+    if org
+        .as_deref()
+        .is_some_and(|o| !st.membership_active(user_id, o))
     {
         return Err(Denied::Membership);
     }

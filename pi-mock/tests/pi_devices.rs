@@ -681,7 +681,6 @@ fn every_response_has_date() {
             "/api/v1/id/me/entitlements?product_id=ubotbuild",
             None,
         ),
-        ("GET", "/v1/me/entitlements", None),
         ("GET", "/no/such/page", None),
     ];
     for (method, path, token) in paths {

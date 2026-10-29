@@ -43,7 +43,7 @@ fn check<T>(errors: &mut Map<String, Value>, field: &str, v: Option<T>) -> Optio
 }
 
 fn denied(st: &State, req: &Req, scope: &str) -> Result<Auth, Resp> {
-    bearer::check(st, req, scope, false).map_err(|d| d.pi())
+    bearer::check(st, req, scope).map_err(|d| d.pi())
 }
 
 fn coded(status: u16, message: &str, code: &str) -> Resp {

@@ -1,5 +1,7 @@
 //! Shared desktop session: credential entries, `session.json`, lease files, the lock
 //! (lease.md §11, ADR 0010).
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::{Deserialize, Serialize};
 
 use super::{Account, Ops, lock};
@@ -14,14 +16,24 @@ use crate::{
 };
 
 /// `session.json`. `profile` caches PI's `/me` so an offline start can show the user.
+///
+/// The single `device_id` of v0.3.0 named a device of the old wire; unknown members are
+/// ignored, so it is read and dropped.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct SessionFile {
     #[serde(default)]
     pub user_id: Option<String>,
     #[serde(default)]
     pub org_context: Option<String>,
+    /// PI device id per product id: PI keys a device by installation, product and account.
     #[serde(default)]
-    pub device_id: Option<String>,
+    pub device_ids: BTreeMap<String, String>,
+    /// Last refresh `timestamp` sent per product id; PI rejects one that is not above it.
+    #[serde(default)]
+    pub last_refresh_ts: BTreeMap<String, i64>,
+    /// Product ids PI refused for want of a plan or seat (`LicenceState::NotEntitled`).
+    #[serde(default)]
+    pub not_entitled: BTreeSet<String>,
     #[serde(default)]
     pub installation_id: String,
     #[serde(default)]
@@ -50,7 +62,9 @@ impl SessionFile {
     pub(super) fn clear_identity(&mut self) {
         self.user_id = None;
         self.org_context = None;
-        self.device_id = None;
+        self.device_ids.clear();
+        self.last_refresh_ts.clear();
+        self.not_entitled.clear();
         self.device_revoked = false;
         self.device_cap_reached = false;
         self.profile = None;
@@ -222,7 +236,9 @@ impl Account {
             .set(DEVICE_ENTRY, &device.to_entry())
             .map_err(store_error)?;
         ops.device = Some(device.clone());
-        if s.device_id.take().is_some() {
+        if !s.device_ids.is_empty() {
+            s.device_ids.clear();
+            s.last_refresh_ts.clear();
             self.remove_leases(None)?;
         }
         self.write_session(ops, &mut s, Floor::Max)?;
@@ -245,6 +261,13 @@ impl Account {
         Ok(())
     }
 
+    /// Deletes `product`'s lease file only.
+    pub(super) fn remove_lease(&self, product: Product) -> Result<(), Error> {
+        storage::remove(&self.paths.lease(product))?;
+        self.view_mut().leases.remove(&product);
+        Ok(())
+    }
+
     pub(super) fn write_lease(
         &self,
         device: &Device,
@@ -263,18 +286,22 @@ impl Account {
         )
     }
 
-    fn read_lease(&self, ops: &Ops, p: Product) -> Result<Option<Result<LeaseSlot, ()>>, Error> {
+    fn read_lease(
+        &self,
+        ops: &Ops,
+        s: &SessionFile,
+        p: Product,
+    ) -> Result<Option<Result<LeaseSlot, ()>>, Error> {
         let Some(bytes) = storage::read(&self.paths.lease(p))? else {
             return Ok(None);
         };
-        let view = self.view();
-        let s = &view.session;
-        let (Some(device), Some(sub), Some(device_id)) = (
-            ops.device.as_ref(),
-            s.user_id.as_deref(),
-            s.device_id.as_deref(),
-        ) else {
+        let (Some(device), Some(sub)) = (ops.device.as_ref(), s.user_id.as_deref()) else {
             return Ok(None);
+        };
+        // No device id for the product: the lease names a device this session does not know.
+        let Some(device_id) = s.device_ids.get(p.id()) else {
+            log::warn!("lease for {} has no device id in the session", p.id());
+            return Ok(Some(Err(())));
         };
         let jkt = device.thumbprint();
         let expect = Expect {
@@ -283,7 +310,6 @@ impl Account {
             product: p,
             sub,
             org: s.org_context.as_deref(),
-            installation_id: &device.installation_id,
             jkt: &jkt,
             device_id,
             nonce: None,
@@ -304,10 +330,11 @@ impl Account {
 
     /// Loads the lease file of every product of this client family (lease.md §9 on load). Only this app's invalid lease is deleted.
     pub(super) fn load_leases(&self, ops: &mut Ops) -> Result<(), Error> {
-        let mut leases = std::collections::BTreeMap::new();
+        let mut leases = BTreeMap::new();
         let mut invalid_own = false;
+        let session = self.view().session.clone();
         for &p in self.cfg.profile.products {
-            match self.read_lease(ops, p)? {
+            match self.read_lease(ops, &session, p)? {
                 Some(Ok(slot)) => {
                     leases.insert(p, slot);
                 }
@@ -319,8 +346,10 @@ impl Account {
         if invalid_own {
             let own = self.cfg.product;
             self.locked(ops, |ops| {
-                // Another app may have written a valid lease since the first read.
-                if let Some(Err(())) = self.read_lease(ops, own)? {
+                // Another app may have written a valid lease, and its device id, since the
+                // first read; judge it against the session on disk.
+                let current = self.read_session_disk(ops).unwrap_or(session);
+                if let Some(Err(())) = self.read_lease(ops, &current, own)? {
                     storage::remove(&self.paths.lease(own))?;
                 }
                 Ok(())

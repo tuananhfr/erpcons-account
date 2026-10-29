@@ -1,6 +1,6 @@
 [package]
 name = "pi-mock"
-description = "In-process mock of the real PI Platform (PI ID) plus the Office contract's licensing endpoints, for ERPCons Office tests and local E2E"
+description = "In-process mock of the real PI Platform (PI ID and its device protocol), for ERPCons account tests and local E2E"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

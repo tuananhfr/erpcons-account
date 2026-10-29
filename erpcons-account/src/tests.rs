@@ -1,15 +1,14 @@
-//! Unit tests: lease.md §12 vectors, JOSE profile, trusted time, catalog, helpers.
+//! Unit tests: PI lease claims, JOSE profile, trusted time, catalog, entitlements, helpers.
 use std::time::Duration;
 
-use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
-use serde_json::json;
+use ed25519_dalek::{Signer, SigningKey};
+use serde_json::{Value, json};
 
 use crate::{
     ApiCode, Backoff, BuiltinFeature, DESKTOP_CLIENT_ID, Error, PLATFORM_KEYS, PinnedKey, Product,
     Tier, VerifyError,
     catalog::{self, is_pinned_free, is_valid_feature_id},
-    device::{self, ProofClaims},
-    jose,
+    device, entitlements, jose,
     lease::{self, Copies, Expect},
     pi_device::{
         INTERNAL_CODES, activate_message, compose_features, is_feature_code, is_nonce,
@@ -22,23 +21,24 @@ use crate::{
 const ISSUER: &str = "https://id.pi.invalid";
 const KID: &str = "pi-lease-example-1";
 const PLATFORM_HEX: &str = "f4d62fdc454061bc8c0a7cb2c1d529254f7dc93492138e2d43f5c048c9e2d200";
-const DEVICE_X: &str = "l6OK4YIRw2jcSo2qqLHguJVk3hK-ESiS5OFGX5SAYsA";
-const DEVICE_JKT: &str = "n5qSxkI9wZW-xoKQMjjpdmktYTcLmdyB_lG9XaQhqLM";
-const USER: &str = "usr_01JB6Z2K8Q4XN3T5V7W9Y1A2C3";
-const ORG: &str = "org_01JB6Z3M5R7T9V1X3Z5B7D9F1H";
-const DEVICE_ID: &str = "dev_01JB7A0C2E4G6J8L0N2Q4S6U8W";
-const INSTALLATION: &str = "6f1c2d3e-4b5a-4c7d-8e9f-0a1b2c3d4e5f";
-const NONCE_ACTIVATE: &str = "RFIe5GcljuC_NMfuhA0MLgYEOTcDhpKb2aN03xTxK0A";
-const NONCE_REFRESH: &str = "69kBNOzEoxD6att1omKEeRkHNBgs9uVXYSqVN_bqg_E";
 const ACTIVATION_NOW: i64 = 1_792_828_800;
-const REFRESH_NOW: i64 = 1_792_915_200;
 
-// JWS strings from the examples of docs/contract.openapi.yaml.
+// v0.3.0 vectors from docs/contract.openapi.yaml: an Office-contract lease and catalog.
 const LEASE_ACTIVATION: &str = "eyJhbGciOiJFZERTQSIsImtpZCI6InBpLWxlYXNlLWV4YW1wbGUtMSIsInR5cCI6InBpLWxlYXNlK2p3dCJ9.eyJpc3MiOiJodHRwczovL2lkLnBpLmludmFsaWQiLCJhdWQiOiJlcnBjb25zLW9mZmljZS1kZXNrdG9wIiwibGVhc2VfaWQiOiJsc2VfMDFKQjdBMkY0SDZLOE0wUDJSNFQ2VjhYMFoiLCJzdWIiOiJ1c3JfMDFKQjZaMks4UTRYTjNUNVY3VzlZMUEyQzMiLCJvcmciOiJvcmdfMDFKQjZaM001UjdUOVYxWDNaNUI3RDlGMUgiLCJkZXZpY2VfaWQiOiJkZXZfMDFKQjdBMEMyRTRHNko4TDBOMlE0UzZVOFciLCJpbnN0YWxsYXRpb25faWQiOiI2ZjFjMmQzZS00YjVhLTRjN2QtOGU5Zi0wYTFiMmMzZDRlNWYiLCJjbmYiOnsiamt0IjoibjVxU3hrSTl3WlcteG9LUU1qanBkbWt0WVRjTG1keUJfbEc5WGFRaHFMTSJ9LCJwcm9kdWN0IjoidmFuYmFuIiwiZmVhdHVyZXMiOlsidmFuYmFuLnVzZSJdLCJlbnRpdGxlbWVudF9pZHMiOlsiZW50XzAxSkI3QTFEM0Y1SDdLOU0xUDNSNVQ3VjlYIl0sIm5iZiI6MTc5MjgyODgwMCwiaWF0IjoxNzkyODI4ODAwLCJleHAiOjE3OTU0MjA4MDAsIm5vbmNlIjoiUkZJZTVHY2xqdUNfTk1mdWhBME1MZ1lFT1RjRGhwS2IyYU4wM3hUeEswQSIsInBvbGljeV92ZXJzaW9uIjoiMjAyNi0xMC0wMS4xIn0.9ErzrUmc2F-ASSgptBdMZXb1cBNDNKvfx1EkVAxGlStKg8wjASj7yZXzCf8yPcHJiaPB05YH7ce3TTBxg4qiAQ";
-const LEASE_REFRESH: &str = "eyJhbGciOiJFZERTQSIsImtpZCI6InBpLWxlYXNlLWV4YW1wbGUtMSIsInR5cCI6InBpLWxlYXNlK2p3dCJ9.eyJpc3MiOiJodHRwczovL2lkLnBpLmludmFsaWQiLCJhdWQiOiJlcnBjb25zLW9mZmljZS1kZXNrdG9wIiwibGVhc2VfaWQiOiJsc2VfMDFKQjlDNEg2SzhNMFAyUjRUNlY4WDBaMkIiLCJzdWIiOiJ1c3JfMDFKQjZaMks4UTRYTjNUNVY3VzlZMUEyQzMiLCJvcmciOiJvcmdfMDFKQjZaM001UjdUOVYxWDNaNUI3RDlGMUgiLCJkZXZpY2VfaWQiOiJkZXZfMDFKQjdBMEMyRTRHNko4TDBOMlE0UzZVOFciLCJpbnN0YWxsYXRpb25faWQiOiI2ZjFjMmQzZS00YjVhLTRjN2QtOGU5Zi0wYTFiMmMzZDRlNWYiLCJjbmYiOnsiamt0IjoibjVxU3hrSTl3WlcteG9LUU1qanBkbWt0WVRjTG1keUJfbEc5WGFRaHFMTSJ9LCJwcm9kdWN0IjoidmFuYmFuIiwiZmVhdHVyZXMiOlsidmFuYmFuLnVzZSJdLCJlbnRpdGxlbWVudF9pZHMiOlsiZW50XzAxSkI3QTFEM0Y1SDdLOU0xUDNSNVQ3VjlYIl0sIm5iZiI6MTc5MjkxNTIwMCwiaWF0IjoxNzkyOTE1MjAwLCJleHAiOjE3OTU1MDcyMDAsIm5vbmNlIjoiNjlrQk5PekVveEQ2YXR0MW9tS0VlUmtITkJnczl1VlhZU3FWTl9icWdfRSIsInBvbGljeV92ZXJzaW9uIjoiMjAyNi0xMC0wMS4xIn0.31UoZBsxzLXSTj-K4SjrT6uKyaEKGRiSiLwzY3wT7tsdqU04WTSrrdRXmzBiKhL0MB0fOMUDqizX1Xah1OUcCA";
 const CATALOG_VANBAN: &str = "eyJhbGciOiJFZERTQSIsImtpZCI6InBpLWxlYXNlLWV4YW1wbGUtMSIsInR5cCI6InBpLWZlYXR1cmUtY2F0YWxvZytqd3QifQ.eyJpc3MiOiJodHRwczovL2lkLnBpLmludmFsaWQiLCJwcm9kdWN0IjoidmFuYmFuIiwiY2F0YWxvZ192ZXJzaW9uIjoxLCJpYXQiOjE3OTI4Mjg4MDAsImZlYXR1cmVzIjpbeyJmZWF0dXJlIjoidmFuYmFuLnZpZXciLCJ0aWVyIjoiZnJlZSJ9LHsiZmVhdHVyZSI6InZhbmJhbi5leHBvcnQiLCJ0aWVyIjoiZnJlZSJ9LHsiZmVhdHVyZSI6InZhbmJhbi51c2UiLCJ0aWVyIjoiZnJlZSJ9XX0.8KO9EMOFTwp8lnncsJmUr2os3nqQJLQexN5RS-8BfCU00lHKM7wsTYlY8mZMx_rFsHrqmwMtN5T7luGA_9iIBg";
-const PROOF_ACTIVATE: &str = "eyJhbGciOiJFZERTQSIsInR5cCI6InBpLWRldmljZS1wcm9vZitqd3QiLCJqd2siOnsia3R5IjoiT0tQIiwiY3J2IjoiRWQyNTUxOSIsIngiOiJsNk9LNFlJUncyamNTbzJxcUxIZ3VKVmszaEstRVNpUzVPRkdYNVNBWXNBIn19.eyJub25jZSI6IlJGSWU1R2NsanVDX05NZnVoQTBNTGdZRU9UY0RocEtiMmFOMDN4VHhLMEEiLCJwdXJwb3NlIjoiYWN0aXZhdGUiLCJpbnN0YWxsYXRpb25faWQiOiI2ZjFjMmQzZS00YjVhLTRjN2QtOGU5Zi0wYTFiMmMzZDRlNWYiLCJwcm9kdWN0X2lkIjoidmFuYmFuIiwicGxhdGZvcm0iOiJ3aW5kb3dzIiwiY2xpZW50X3ZlcnNpb24iOiIwLjYuNSIsImlhdCI6MTc5MjgyODc5OH0.xmMHF-Cye5aX_-1vh-Ip9HamZwwTogdIB19m5UoA00NgYsE1tf8JChUPeB3gBep5mhF4j30Kc9kpAK_PN5tCCA";
-const PROOF_REFRESH: &str = "eyJhbGciOiJFZERTQSIsInR5cCI6InBpLWRldmljZS1wcm9vZitqd3QiLCJqd2siOnsia3R5IjoiT0tQIiwiY3J2IjoiRWQyNTUxOSIsIngiOiJsNk9LNFlJUncyamNTbzJxcUxIZ3VKVmszaEstRVNpUzVPRkdYNVNBWXNBIn19.eyJub25jZSI6IjY5a0JOT3pFb3hENmF0dDFvbUtFZVJrSE5CZ3M5dVZYWVNxVk5fYnFnX0UiLCJwdXJwb3NlIjoicmVmcmVzaCIsImRldmljZV9pZCI6ImRldl8wMUpCN0EwQzJFNEc2SjhMME4yUTRTNlU4VyIsImluc3RhbGxhdGlvbl9pZCI6IjZmMWMyZDNlLTRiNWEtNGM3ZC04ZTlmLTBhMWIyYzNkNGU1ZiIsInByb2R1Y3RfaWQiOiJ2YW5iYW4iLCJwbGF0Zm9ybSI6IndpbmRvd3MiLCJjbGllbnRfdmVyc2lvbiI6IjAuNi41IiwiaWF0IjoxNzkyOTE1MTk4fQ.O6I8mHOcSFMtnxmQSuzARuBYdcj03B2z8hkbx8AXmb8ncSE-Bx7W5AKf_WmgOq6SiJcaBkRIAZzoKDhQPNCECw";
+
+// A PI lease (pi_device `Devices::issueLease`) signed by a test key; the device is `seven_device`.
+const PI_KID: &str = "lease-test-1";
+const PI_SEED: [u8; 32] = [11; 32];
+const PI_USER: &str = "6f3b1c2a-9d4e-4f8a-b1c7-2e5d8a9f0b13";
+const PI_ORG: &str = "0c9e7a51-3b2d-4c6f-8e1a-5d7b9f2c4e60";
+const PI_TENANT: &str = "7d3e9a10-5b2c-4f6d-8e1a-2c4b6d8f0a12";
+const PI_DEVICE: &str = "3c2b1a09-8f7e-4d6c-b5a4-938271605f4e";
+const PI_LEASE_ID: &str = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
+const PI_NONCE: &str = "AbCdEfGhIjKlMnOpQrStUvWxYz012345";
+const PI_NOW: i64 = 1_793_232_000;
+const PI_UNTIL: &str = "2026-11-05T00:00:00Z";
+const UBOTCAD: &str = "ubotcad-desktop";
 
 fn hex32(s: &str) -> [u8; 32] {
     let bytes: Vec<u8> = (0..32)
@@ -54,68 +54,306 @@ fn keys() -> Vec<PinnedKey> {
     }]
 }
 
-fn expect(nonce: &'static str) -> Expect<'static> {
-    Expect {
-        issuer: ISSUER,
-        audience: DESKTOP_CLIENT_ID,
-        product: Product::VanBan,
-        sub: USER,
-        org: Some(ORG),
-        installation_id: INSTALLATION,
-        jkt: DEVICE_JKT,
-        device_id: DEVICE_ID,
-        nonce: Some(nonce),
-    }
-}
-
-fn copies(until: &'static str) -> (Vec<String>, Vec<String>, &'static str) {
-    (
-        vec!["ent_01JB7A1D3F5H7K9M1P3R5T7V9X".into()],
-        vec!["vanban.use".into()],
-        until,
+fn sign_compact(header: &str, payload: &str, key: &SigningKey) -> String {
+    let input = format!(
+        "{}.{}",
+        jose::b64(header.as_bytes()),
+        jose::b64(payload.as_bytes())
+    );
+    format!(
+        "{input}.{}",
+        jose::b64(&key.sign(input.as_bytes()).to_bytes())
     )
 }
 
-#[test]
-fn vector_device_thumbprint() {
-    assert_eq!(jose::thumbprint(DEVICE_X), DEVICE_JKT);
+fn pi_keys() -> Vec<PinnedKey> {
+    vec![PinnedKey {
+        kid: PI_KID.into(),
+        key: SigningKey::from_bytes(&PI_SEED).verifying_key().to_bytes(),
+    }]
+}
+
+fn pi_claims() -> Value {
+    json!({
+        "iss": ISSUER,
+        "jti": PI_LEASE_ID,
+        "sub": PI_USER,
+        "org": PI_ORG,
+        "tenant": PI_TENANT,
+        "product": "ubotbuild",
+        "device": PI_DEVICE,
+        "cnf": {"jkt": PI_JKT},
+        "features": ["cad-view", "cad-export", "cad-use", "offline"],
+        "offline_allowed": true,
+        "policy_version": "ubb-mien-phi@1",
+        "nonce": PI_NONCE,
+        "iat": PI_NOW,
+        "nbf": PI_NOW,
+        "exp": PI_NOW + 7 * 86_400,
+        "warn_days": [7, 3, 1],
+        "after_expiry": "read_export",
+        "aud": UBOTCAD,
+    })
+}
+
+fn pi_lease(claims: &Value) -> String {
+    let header = format!(r#"{{"alg":"EdDSA","typ":"pi-lease+jwt","kid":"{PI_KID}"}}"#);
+    sign_compact(
+        &header,
+        &claims.to_string(),
+        &SigningKey::from_bytes(&PI_SEED),
+    )
+}
+
+fn pi_expect() -> Expect<'static> {
+    Expect {
+        issuer: ISSUER,
+        audience: UBOTCAD,
+        product: Product::UbotBuild,
+        sub: PI_USER,
+        org: Some(PI_ORG),
+        jkt: PI_JKT,
+        device_id: PI_DEVICE,
+        nonce: Some(PI_NONCE),
+    }
+}
+
+fn pi_verify(claims: &Value) -> Result<lease::Lease, VerifyError> {
+    lease::verify(&pi_lease(claims), &pi_keys(), &pi_expect())
+}
+
+fn strings(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| s.to_string()).collect()
+}
+
+fn pi_copies<'a>(rights: &'a [String], entitlement: Option<&'a str>) -> Copies<'a> {
+    Copies {
+        entitlement_id: entitlement,
+        rights,
+        offline_valid_until: PI_UNTIL,
+        policy_version: "ubb-mien-phi@1",
+        lease_id: PI_LEASE_ID,
+    }
 }
 
 #[test]
-fn vector_leases_pass_section_9() {
-    for (jws, nonce, now, until, exp) in [
+fn pi_lease_passes_and_composes_features() {
+    let lease = pi_verify(&pi_claims()).unwrap();
+    assert_eq!(lease.lease_id, PI_LEASE_ID);
+    assert_eq!(lease.org, PI_ORG);
+    assert_eq!(lease.tenant, PI_TENANT);
+    assert_eq!(lease.device_id, PI_DEVICE);
+    assert_eq!(
+        lease.features,
+        [
+            "ubotbuild.cad-view",
+            "ubotbuild.cad-export",
+            "ubotbuild.cad-use"
+        ]
+    );
+    lease.window(PI_NOW).unwrap();
+    let rights = strings(&["cad-view", "cad-export", "cad-use", "offline"]);
+    lease
+        .check_copies(&pi_copies(&rights, Some(PI_TENANT)))
+        .unwrap();
+    // A refresh response has no `entitlementId`.
+    lease.check_copies(&pi_copies(&rights, None)).unwrap();
+    // Loaded from disk: no nonce to compare.
+    let stored = Expect {
+        nonce: None,
+        ..pi_expect()
+    };
+    lease::verify(&pi_lease(&pi_claims()), &pi_keys(), &stored).unwrap();
+}
+
+#[test]
+fn pi_lease_claim_checks_fail_in_order() {
+    let cases: Vec<(Expect, VerifyError)> = vec![
         (
-            LEASE_ACTIVATION,
-            NONCE_ACTIVATE,
-            ACTIVATION_NOW,
-            "2026-11-23T08:00:00Z",
-            1_795_420_800,
+            Expect {
+                issuer: "https://other.invalid",
+                ..pi_expect()
+            },
+            VerifyError::Issuer,
         ),
         (
-            LEASE_REFRESH,
-            NONCE_REFRESH,
-            REFRESH_NOW,
-            "2026-11-24T08:00:00Z",
-            1_795_507_200,
+            Expect {
+                audience: DESKTOP_CLIENT_ID,
+                ..pi_expect()
+            },
+            VerifyError::Audience,
         ),
-    ] {
-        let lease = lease::verify(jws, &keys(), &expect(nonce)).unwrap();
-        lease.window(now).unwrap();
-        let (ids, rights, until) = copies(until);
-        lease
-            .check_copies(&Copies {
-                entitlement_ids: &ids,
-                rights: &rights,
-                offline_valid_until: until,
-                policy_version: "2026-10-01.1",
-            })
-            .unwrap();
-        assert_eq!(lease.exp, exp);
-        assert_eq!(lease.features, ["vanban.use"]);
-        let mut time = TrustedTime::new(0, Duration::ZERO);
-        time.now(now, Duration::ZERO);
-        assert!(!time.correct(lease.iat, Duration::ZERO));
+        (
+            Expect {
+                product: Product::VanBan,
+                ..pi_expect()
+            },
+            VerifyError::Product,
+        ),
+        (
+            Expect {
+                sub: "2b7c4d1e-8f3a-4b6c-9d2e-1f0a3b5c7d94",
+                ..pi_expect()
+            },
+            VerifyError::Subject,
+        ),
+        (
+            Expect {
+                org: Some("a4d2f6b8-1e3c-4a5b-9c7d-8e0f2a4b6c81"),
+                ..pi_expect()
+            },
+            VerifyError::Org,
+        ),
+        (
+            Expect {
+                org: None,
+                ..pi_expect()
+            },
+            VerifyError::Org,
+        ),
+        (
+            Expect {
+                jkt: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                ..pi_expect()
+            },
+            VerifyError::KeyBinding,
+        ),
+        (
+            Expect {
+                device_id: "00000000-0000-4000-8000-000000000000",
+                ..pi_expect()
+            },
+            VerifyError::Device,
+        ),
+        (
+            Expect {
+                nonce: Some("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"),
+                ..pi_expect()
+            },
+            VerifyError::Nonce,
+        ),
+    ];
+    let jws = pi_lease(&pi_claims());
+    for (e, want) in cases {
+        assert_eq!(lease::verify(&jws, &pi_keys(), &e).unwrap_err(), want);
     }
+    let other_kid = vec![PinnedKey {
+        kid: "next".into(),
+        ..pi_keys().remove(0)
+    }];
+    assert_eq!(
+        lease::verify(&jws, &other_kid, &pi_expect()).unwrap_err(),
+        VerifyError::UnknownKey
+    );
+    let mut forged = jws.clone();
+    forged.pop();
+    forged.push('B');
+    assert!(matches!(
+        lease::verify(&forged, &pi_keys(), &pi_expect()).unwrap_err(),
+        VerifyError::Signature | VerifyError::Format
+    ));
+    let lease = lease::verify(&jws, &pi_keys(), &pi_expect()).unwrap();
+    assert_eq!(lease.window(lease.nbf - 301), Err(VerifyError::NotYetValid));
+    assert_eq!(lease.window(lease.nbf - 300), Ok(()));
+    assert_eq!(lease.window(lease.exp), Err(VerifyError::Expired));
+    let rights = strings(&["cad-view", "cad-export", "cad-use", "offline"]);
+    let extra = strings(&["cad-view", "cad-export", "cad-use", "cad-3d"]);
+    for copies in [
+        pi_copies(&extra, Some(PI_TENANT)),
+        pi_copies(&rights, Some("other-tenant")),
+        Copies {
+            offline_valid_until: "2026-11-06T00:00:00Z",
+            ..pi_copies(&rights, None)
+        },
+        Copies {
+            policy_version: "ubb-mien-phi@2",
+            ..pi_copies(&rights, None)
+        },
+        Copies {
+            lease_id: "other",
+            ..pi_copies(&rights, None)
+        },
+    ] {
+        assert_eq!(lease.check_copies(&copies), Err(VerifyError::CopyMismatch));
+    }
+}
+
+#[test]
+fn pi_lease_claim_shapes() {
+    for name in [
+        "iss",
+        "jti",
+        "sub",
+        "org",
+        "tenant",
+        "product",
+        "device",
+        "cnf",
+        "features",
+        "policy_version",
+        "nonce",
+        "iat",
+        "nbf",
+        "exp",
+        "aud",
+    ] {
+        let mut claims = pi_claims();
+        claims.as_object_mut().unwrap().remove(name);
+        assert_eq!(pi_verify(&claims), Err(VerifyError::Claims), "{name}");
+    }
+    for (name, value, want) in [
+        ("org", Value::Null, Err(VerifyError::Claims)),
+        ("org", json!(""), Err(VerifyError::Claims)),
+        ("jti", json!(""), Err(VerifyError::Claims)),
+        ("aud", json!([UBOTCAD]), Err(VerifyError::Claims)),
+        ("features", json!(["CAD_USE"]), Err(VerifyError::Feature)),
+        ("iat", json!(PI_NOW + 1), Err(VerifyError::Validity)),
+        ("exp", json!(PI_NOW), Err(VerifyError::Validity)),
+        ("exp", json!(PI_NOW + 7_776_001), Err(VerifyError::Validity)),
+        ("exp", json!(PI_NOW + 7_776_000), Ok(())),
+        ("policy_version", json!(""), Ok(())),
+        ("installation_id", json!("ignored"), Ok(())),
+        ("future_claim", json!({"x": 1}), Ok(())),
+    ] {
+        let mut claims = pi_claims();
+        claims[name] = value;
+        assert_eq!(pi_verify(&claims).map(|_| ()), want, "{name}");
+    }
+    let mut minimal = pi_claims();
+    for name in ["offline_allowed", "warn_days", "after_expiry"] {
+        minimal.as_object_mut().unwrap().remove(name);
+    }
+    pi_verify(&minimal).unwrap();
+    // Composed ids may pass 64 characters; PI's code rule caps only the code.
+    let code = format!("a{}", "b".repeat(63));
+    let mut long = pi_claims();
+    long["features"] = json!([code]);
+    let lease = pi_verify(&long).unwrap();
+    assert_eq!(lease.features, [format!("ubotbuild.{code}")]);
+    assert!(lease.features[0].len() > 64);
+}
+
+#[test]
+fn v030_lease_is_rejected() {
+    let e = Expect {
+        issuer: ISSUER,
+        audience: DESKTOP_CLIENT_ID,
+        product: Product::VanBan,
+        sub: "usr_01JB6Z2K8Q4XN3T5V7W9Y1A2C3",
+        org: Some("org_01JB6Z3M5R7T9V1X3Z5B7D9F1H"),
+        jkt: "n5qSxkI9wZW-xoKQMjjpdmktYTcLmdyB_lG9XaQhqLM",
+        device_id: "dev_01JB7A0C2E4G6J8L0N2Q4S6U8W",
+        nonce: Some("RFIe5GcljuC_NMfuhA0MLgYEOTcDhpKb2aN03xTxK0A"),
+    };
+    assert_eq!(
+        lease::verify(LEASE_ACTIVATION, &keys(), &e).unwrap_err(),
+        VerifyError::Claims
+    );
+}
+
+#[test]
+fn device_thumbprint_is_pi_raw_key_hash() {
+    assert_eq!(seven_device().thumbprint(), PI_JKT);
 }
 
 #[test]
@@ -134,7 +372,7 @@ fn vector_catalog_verifies() {
     );
     // Explicit typing: a catalog is never a lease and a lease never a catalog.
     assert_eq!(
-        lease::verify(CATALOG_VANBAN, &keys(), &expect(NONCE_ACTIVATE)).unwrap_err(),
+        lease::verify(CATALOG_VANBAN, &keys(), &pi_expect()).unwrap_err(),
         VerifyError::Header
     );
     assert_eq!(
@@ -143,153 +381,78 @@ fn vector_catalog_verifies() {
     );
 }
 
-#[test]
-fn vector_proofs_match_client_encoding() {
-    let key =
-        VerifyingKey::from_bytes(&jose::unb64(DEVICE_X).unwrap().try_into().unwrap()).unwrap();
-    for (jws, nonce, purpose, device_id, iat) in [
-        (
-            PROOF_ACTIVATE,
-            NONCE_ACTIVATE,
-            "activate",
-            None,
-            1_792_828_798,
-        ),
-        (
-            PROOF_REFRESH,
-            NONCE_REFRESH,
-            "refresh",
-            Some(DEVICE_ID),
-            1_792_915_198,
-        ),
-    ] {
-        let parts: Vec<&str> = jws.split('.').collect();
-        let claims = ProofClaims {
-            nonce,
-            purpose,
-            device_id,
-            installation_id: INSTALLATION,
-            product_id: "vanban",
-            platform: "windows",
-            client_version: "0.6.5",
-            iat,
-        };
-        assert_eq!(
-            parts[0],
-            jose::b64(device::proof_header(DEVICE_X).as_bytes())
-        );
-        assert_eq!(
-            parts[1],
-            jose::b64(serde_json::to_string(&claims).unwrap().as_bytes())
-        );
-        let sig = Signature::from_slice(&jose::unb64(parts[2]).unwrap()).unwrap();
-        key.verify_strict(format!("{}.{}", parts[0], parts[1]).as_bytes(), &sig)
-            .unwrap();
-    }
+fn row(org: &str, product: &str, decision: &str, seat: bool, codes: &[&str]) -> Value {
+    let features: Vec<Value> = codes
+        .iter()
+        .map(|c| json!({"code": c, "name": c, "source": "plan"}))
+        .collect();
+    json!({
+        "organization": {"id": org, "name": "A", "role": "member"},
+        "tenant": {"id": PI_TENANT, "code": "t", "product": product},
+        "decision": decision,
+        "reasonCode": "OK",
+        "features": features,
+        "quotas": [],
+        "policyVersion": 1,
+        "subscription": null,
+        "evaluatedAt": "2026-10-29T00:00:00Z",
+        "seat": seat,
+        "offline": {"allowed": true, "days": 7, "deviceCap": 2},
+    })
+}
+
+fn parse_rows(rows: Vec<Value>) -> Result<Vec<(String, bool)>, Error> {
+    let body = json!({"ok": true, "items": rows}).to_string();
+    entitlements::parse(body.as_bytes(), Product::UbotBuild, PI_ORG).map(|list| {
+        list.into_iter()
+            .map(|e| (e.feature, e.offline_allowed))
+            .collect()
+    })
 }
 
 #[test]
-fn lease_claim_checks_fail_in_order() {
-    let ok = expect(NONCE_ACTIVATE);
-    let cases: Vec<(Expect, VerifyError)> = vec![
-        (
-            Expect {
-                issuer: "https://other.invalid",
-                ..expect(NONCE_ACTIVATE)
-            },
-            VerifyError::Issuer,
+fn pi_entitlement_rows() {
+    let allow = row(PI_ORG, "ubotbuild", "ALLOW", true, &["cad-view", "offline"]);
+    assert_eq!(
+        parse_rows(vec![allow.clone()]).unwrap(),
+        [("ubotbuild.cad-view".to_owned(), true)]
+    );
+    let mut no_offline = allow.clone();
+    no_offline["offline"]["allowed"] = json!(false);
+    assert_eq!(
+        parse_rows(vec![no_offline]).unwrap(),
+        [("ubotbuild.cad-view".to_owned(), false)]
+    );
+    for ignored in [
+        row(PI_ORG, "ubotbuild", "DENY", true, &["cad-use"]),
+        row(PI_ORG, "ubotbuild", "ALLOW", false, &["cad-use"]),
+    ] {
+        assert!(parse_rows(vec![ignored]).unwrap().is_empty());
+    }
+    assert!(parse_rows(Vec::new()).unwrap().is_empty());
+    for foreign in [
+        row(
+            "a4d2f6b8-1e3c-4a5b-9c7d-8e0f2a4b6c81",
+            "ubotbuild",
+            "ALLOW",
+            true,
+            &["cad-use"],
         ),
-        (
-            Expect {
-                audience: "erpcons-office-web",
-                ..expect(NONCE_ACTIVATE)
-            },
-            VerifyError::Audience,
-        ),
-        (
-            Expect {
-                product: Product::Pdf,
-                ..expect(NONCE_ACTIVATE)
-            },
-            VerifyError::Product,
-        ),
-        (
-            Expect {
-                sub: "usr_other",
-                ..expect(NONCE_ACTIVATE)
-            },
-            VerifyError::Subject,
-        ),
-        (
-            Expect {
-                org: None,
-                ..expect(NONCE_ACTIVATE)
-            },
-            VerifyError::Org,
-        ),
-        (
-            Expect {
-                installation_id: "00000000-0000-4000-8000-000000000000",
-                ..expect(NONCE_ACTIVATE)
-            },
-            VerifyError::Installation,
-        ),
-        (
-            Expect {
-                jkt: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-                ..expect(NONCE_ACTIVATE)
-            },
-            VerifyError::KeyBinding,
-        ),
-        (
-            Expect {
-                device_id: "dev_other",
-                ..expect(NONCE_ACTIVATE)
-            },
-            VerifyError::Device,
-        ),
-        (expect(NONCE_REFRESH), VerifyError::Nonce),
-    ];
-    for (e, want) in cases {
+        row(PI_ORG, "erpcons", "ALLOW", true, &["cad-use"]),
+    ] {
         assert_eq!(
-            lease::verify(LEASE_ACTIVATION, &keys(), &e).unwrap_err(),
-            want
+            parse_rows(vec![allow.clone(), foreign]),
+            Err(Error::TenantIsolation)
         );
     }
-    let other_kid = vec![PinnedKey {
-        kid: "next".into(),
-        key: hex32(PLATFORM_HEX),
-    }];
-    assert_eq!(
-        lease::verify(LEASE_ACTIVATION, &other_kid, &ok).unwrap_err(),
-        VerifyError::UnknownKey
-    );
-    let mut forged = LEASE_ACTIVATION.to_owned();
-    forged.pop();
-    forged.push('B');
     assert!(matches!(
-        lease::verify(&forged, &keys(), &ok).unwrap_err(),
-        VerifyError::Signature | VerifyError::Format
+        parse_rows(vec![row(PI_ORG, "ubotbuild", "ALLOW", true, &["CAD_USE"])]),
+        Err(Error::BadResponse(_))
     ));
-    let lease = lease::verify(LEASE_ACTIVATION, &keys(), &ok).unwrap();
-    assert_eq!(lease.window(lease.nbf - 301), Err(VerifyError::NotYetValid));
-    assert_eq!(lease.window(lease.nbf - 300), Ok(()));
-    assert_eq!(lease.window(lease.exp), Err(VerifyError::Expired));
-    let (ids, _, until) = copies("2026-11-23T08:00:00Z");
-    let rights = vec!["vanban.use".to_owned(), "vanban.extra".to_owned()];
-    assert_eq!(
-        lease.check_copies(&Copies {
-            entitlement_ids: &ids,
-            rights: &rights,
-            offline_valid_until: until,
-            policy_version: "2026-10-01.1",
-        }),
-        Err(VerifyError::CopyMismatch)
-    );
 }
 
 fn signed(header: &serde_json::Value, payload: &str, key: &SigningKey) -> String {
-    jose::sign_compact(&header.to_string(), payload, key)
+    sign_compact(&header.to_string(), payload, key)
 }
 
 #[test]
@@ -572,10 +735,10 @@ fn office_profile_unchanged() {
 
 #[test]
 fn ubotbuild_feature_ids() {
-    assert!(is_valid_feature_id("ubotbuild.cad.use"));
-    assert!(is_pinned_free("ubotbuild.cad.view"));
-    assert!(is_pinned_free("ubotbuild.cad.export"));
-    assert!(!is_pinned_free("ubotbuild.cad.use"));
+    assert!(is_valid_feature_id("ubotbuild.cad-use"));
+    assert!(is_pinned_free("ubotbuild.cad-view"));
+    assert!(is_pinned_free("ubotbuild.cad-export"));
+    assert!(!is_pinned_free("ubotbuild.cad-use"));
     assert!(!is_pinned_free("ubotbuild.view"));
     assert!(is_pinned_free("vanban.view"));
     assert!(!is_pinned_free("vanban.x.view"));
@@ -586,9 +749,9 @@ fn ubotbuild_builtin_defaults() {
     assert_eq!(
         BuiltinFeature::defaults(Product::UbotBuild),
         vec![
-            BuiltinFeature::new("ubotbuild.cad.view", Tier::Free),
-            BuiltinFeature::new("ubotbuild.cad.export", Tier::Free),
-            BuiltinFeature::new("ubotbuild.cad.use", Tier::Pro),
+            BuiltinFeature::new("ubotbuild.cad-view", Tier::Free),
+            BuiltinFeature::new("ubotbuild.cad-export", Tier::Free),
+            BuiltinFeature::new("ubotbuild.cad-use", Tier::Pro),
         ]
     );
 }

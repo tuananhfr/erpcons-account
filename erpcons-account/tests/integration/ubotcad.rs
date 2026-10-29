@@ -1,31 +1,15 @@
 //! UbotCAD client family against pi-mock: own client id, product and feature ids.
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use erpcons_account::{Error, LicenceState, Product, RevocationReason, Status, VerifyError};
-use pi_mock::{DEFAULT_USER, Entitlement, LeaseTamper, Scenario};
+use erpcons_account::{ApiCode, Error, LicenceState, Product, Status, VerifyError};
+use pi_mock::{LeaseTamper, Scenario};
 
-use crate::common::{Env, sign_in, signed_in};
-
-const USE: &str = "ubotbuild.cad.use";
+use crate::common::{EXPORT, Env, PRO as USE, VIEW, licensed, sign_in, signed_in};
 
 fn scenario() -> Scenario {
-    Scenario {
-        entitlements: vec![Entitlement::new("ent_cad", DEFAULT_USER, None, USE)],
-        ..Scenario::default()
-    }
+    licensed()
 }
 
 fn ubotcad(env: &Env) -> erpcons_account::Account {
-    env.account_for(Product::UbotBuild)
-}
-
-fn lease_claims(env: &Env, product: &str) -> serde_json::Value {
-    let sealed = std::fs::read_to_string(env.file(&format!("lease-{product}.json"))).unwrap();
-    let body: serde_json::Value = serde_json::from_str(sealed.lines().next().unwrap()).unwrap();
-    let jws = body["lease"].as_str().unwrap();
-    let payload = URL_SAFE_NO_PAD
-        .decode(jws.split('.').nth(1).unwrap())
-        .unwrap();
-    serde_json::from_slice(&payload).unwrap()
+    env.cad()
 }
 
 #[test]
@@ -50,9 +34,10 @@ fn ubotcad_lease_grants_cad_use() {
     let account = ubotcad(&env);
     sign_in(&account);
     assert!(account.allowed(USE));
-    let claims = lease_claims(&env, "ubotbuild");
+    let claims = env.lease_claims("ubotbuild");
     assert_eq!(claims["aud"], "ubotcad-desktop");
     assert_eq!(claims["product"], "ubotbuild");
+    assert_eq!(claims["features"], serde_json::json!(pi_mock::FREE_UBOTCAD));
     let licences = signed_in(account.status()).licences;
     assert_eq!(
         licences.keys().copied().collect::<Vec<_>>(),
@@ -73,9 +58,10 @@ fn ubotcad_revoked_device_keeps_view() {
     let device = account.diagnostics().device_id.unwrap();
     assert!(env.server.revoke_device(&device));
     env.advance(13 * 3600);
-    assert_eq!(
-        account.refresh(),
-        Err(Error::Revoked(RevocationReason::DeviceRevoked))
+    let err = account.refresh().unwrap_err();
+    assert!(
+        matches!(&err, Error::Api(e) if e.code == ApiCode::DeviceRevoked),
+        "{err:?}"
     );
     assert!(!env.file("lease-ubotbuild.json").exists());
     assert_eq!(
@@ -86,8 +72,8 @@ fn ubotcad_revoked_device_keeps_view() {
     assert!(account.allowed(USE));
     env.advance(11 * 60);
     assert!(!account.allowed(USE));
-    assert!(account.allowed("ubotbuild.cad.view"));
-    assert!(account.allowed("ubotbuild.cad.export"));
+    assert!(account.allowed(VIEW));
+    assert!(account.allowed(EXPORT));
 }
 
 #[test]

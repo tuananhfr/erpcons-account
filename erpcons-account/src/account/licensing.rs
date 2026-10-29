@@ -1,40 +1,41 @@
-//! Device activation, lease refresh and revocation (lease.md §3, §6, §8, §9), in the wire format
-//! of the Office contract. PI's device protocol differs, so all of it stays behind
-//! `Config::offline_licensing`, off by default (ADR 0011).
-use std::collections::BTreeSet;
+//! Device activation, lease refresh and revocation (lease.md §3, §6, §8, §9) in PI's device
+//! protocol (ADR 0012), all behind `Config::offline_licensing`.
+use std::{collections::BTreeSet, sync::atomic::Ordering};
 
 use serde::Deserialize;
 use serde_json::json;
 
 use super::{Account, Ops, lock, shared::Floor};
 use crate::{
-    ApiCode, Error, RevocationReason,
-    device::{Device, ProofClaims},
+    ApiCode, Error, VerifyError,
+    device::Device,
+    http::{Body, Retry, query_escape},
     jose::MAX_JWS,
     lease::{self, Copies, Expect},
+    pi_device::{activate_message, is_nonce, refresh_message},
+    random,
 };
 
 const LEASE_REFRESH_EVERY: i64 = 12 * 3600;
 
+/// Activation (201) and refresh (200) answer; only activation carries `entitlementId`.
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LeaseResponse {
     device_id: String,
-    entitlement_ids: Vec<String>,
+    #[serde(default)]
+    entitlement_id: Option<String>,
     rights: Vec<String>,
     offline_valid_until: String,
     policy_version: String,
+    lease_id: String,
     lease: String,
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-enum RefreshResponse {
-    Active(LeaseResponse),
-    Revoked { reason: String },
-}
-
-#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Challenge {
+    challenge_id: String,
     nonce: String,
 }
 
@@ -44,12 +45,23 @@ impl Account {
         if !self.persistent || !self.cfg.offline_licensing {
             return Ok(());
         }
+        let product = self.cfg.product.id();
         let now = self.effective_now();
-        let (ready, activated, due) = {
+        let (ready, activated, due, lift) = {
             let view = self.view();
             let s = &view.session;
-            let ready =
-                view.signed_in && s.user_id.is_some() && !s.device_revoked && !s.device_cap_reached;
+            // An ALLOW row with a seat means PI would now answer an activation.
+            let granted = view
+                .entitlements
+                .as_ref()
+                .is_some_and(|(list, _)| !list.is_empty());
+            let refused = s.not_entitled.contains(product);
+            let ready = view.signed_in
+                && s.user_id.is_some()
+                && s.org_context.is_some()
+                && !s.device_revoked
+                && !s.device_cap_reached
+                && (!refused || granted);
             let due = view.leases.get(&self.cfg.product).map(|slot| {
                 now - slot.lease.iat >= LEASE_REFRESH_EVERY
                     || slot.lease.window(now).is_err()
@@ -62,8 +74,18 @@ impl Account {
                         granted != slot.lease.features.iter().map(String::as_str).collect()
                     })
             });
-            (ready, s.device_id.is_some(), due)
+            (
+                ready,
+                s.device_ids.contains_key(product),
+                due,
+                ready && refused,
+            )
         };
+        if lift {
+            self.update_session(ops, |s| {
+                s.not_entitled.remove(product);
+            })?;
+        }
         match (ready, activated, due) {
             (false, _, _) => Ok(()),
             (true, true, Some(false)) => Ok(()),
@@ -72,7 +94,7 @@ impl Account {
         }
     }
 
-    /// `POST /v1/devices/activate` for this product, under the shared lock.
+    /// Challenge, then `POST /devices/activate` for this product, under the shared lock.
     pub(super) fn activate(&self, ops: &mut Ops) -> Result<(), Error> {
         if !self.cfg.offline_licensing {
             return Ok(());
@@ -80,6 +102,7 @@ impl Account {
         if !self.persistent {
             return Err(Error::CredentialStoreUnavailable);
         }
+        let product = self.cfg.product;
         self.locked(ops, |ops| {
             self.reload_with(ops)?;
             {
@@ -88,76 +111,101 @@ impl Account {
                 if !view.signed_in || s.user_id.is_none() {
                     return Err(Error::NotSignedIn);
                 }
-                if s.device_revoked || s.device_cap_reached {
+                // PI leases a product to an organization only (`ORG_CONTEXT_REQUIRED`).
+                if s.org_context.is_none()
+                    || s.device_revoked
+                    || s.device_cap_reached
+                    || s.not_entitled.contains(product.id())
+                {
                     return Err(Error::ActivationBlocked);
                 }
                 let now = self.effective_now();
                 // Another app may have activated this product while we waited for the lock.
                 if view
                     .leases
-                    .get(&self.cfg.product)
+                    .get(&product)
                     .is_some_and(|l| l.lease.window(now).is_ok())
                 {
                     return Ok(());
                 }
             }
-            let (mut new_challenge, mut new_key) = (true, true);
+            let mut new_challenge = true;
             loop {
                 let error = match self.activate_once(ops) {
                     Ok(()) => return Ok(()),
                     Err(e) => e,
                 };
-                match error.api_code() {
-                    Some(ApiCode::ChallengeInvalid) if std::mem::take(&mut new_challenge) => {}
-                    Some(ApiCode::InstallationKeyMismatch) if std::mem::take(&mut new_key) => {
-                        self.replace_device(ops)?;
-                    }
-                    _ => {
-                        self.on_device_error(ops, &error)?;
-                        return Err(error);
-                    }
+                if error.api_code() == Some(&ApiCode::ChallengeInvalid)
+                    && std::mem::take(&mut new_challenge)
+                {
+                    continue;
                 }
+                self.on_device_error(ops, &error)?;
+                return Err(error);
             }
         })
     }
 
     fn activate_once(&self, ops: &mut Ops) -> Result<(), Error> {
         let device = self.ensure_device(ops)?;
-        let nonce = self.challenge(ops, "activate", &device)?;
-        let proof = self.proof(&device, &nonce, "activate", None)?;
-        let url = self.cfg.contract_url("/v1/devices/activate");
+        let product = self.cfg.product.id();
+        let url = self.cfg.pi_url(&format!(
+            "/devices/challenge?product_id={}",
+            query_escape(product)
+        ));
+        let challenge: Challenge = self.api_get(ops, &url)?.json()?;
+        if !is_nonce(&challenge.nonce) {
+            return Err(Error::BadResponse("challenge nonce".into()));
+        }
+        let message = activate_message(
+            &challenge.challenge_id,
+            &challenge.nonce,
+            &device.installation_id,
+            product,
+        );
+        let url = self.cfg.pi_url("/devices/activate");
         let reply = self.api_post(
             ops,
             &url,
             &json!({
-                "installation_id": device.installation_id,
-                "product_id": self.cfg.product.id(),
+                "installationId": device.installation_id,
+                "productId": product,
                 "platform": self.cfg.platform.id(),
-                "client_version": self.cfg.client_version,
-                "signed_challenge": proof,
+                "clientVersion": self.cfg.client_version,
+                "devicePublicKey": device.x(),
+                "challengeId": challenge.challenge_id,
+                "signedChallenge": device.sign(&message),
             }),
         )?;
         let response: LeaseResponse = reply.json()?;
-        self.accept_lease(ops, &device, &response, &nonce)
+        self.accept_lease(ops, &device, &response, &challenge.nonce)
     }
 
-    /// `POST /v1/licenses/refresh` for this product, under the shared lock.
+    /// `POST /licenses/refresh` for this product, under the shared lock.
     pub(super) fn refresh_lease(&self, ops: &mut Ops) -> Result<(), Error> {
+        let product = self.cfg.product;
         self.locked(ops, |ops| {
             self.reload_with(ops)?;
-            if self.view().session.device_id.is_none() {
+            let device_id = self.view().session.device_ids.get(product.id()).cloned();
+            let Some(device_id) = device_id else {
                 return self.activate(ops);
-            }
-            let (mut new_challenge, mut reactivate) = (true, true);
+            };
+            let mut retimed = true;
             loop {
-                let error = match self.refresh_once(ops) {
+                let error = match self.refresh_once(ops, &device_id) {
                     Ok(()) => return Ok(()),
                     Err(e) => e,
                 };
-                match error.api_code() {
-                    Some(ApiCode::ChallengeInvalid) if std::mem::take(&mut new_challenge) => {}
-                    Some(ApiCode::DeviceUnknown) if std::mem::take(&mut reactivate) => {
-                        self.on_device_error(ops, &error)?;
+                match &error {
+                    // The reply's `Date` has corrected the clock offset; a new timestamp once.
+                    Error::Api(e)
+                        if e.status == 422
+                            && e.errors.iter().any(|f| f == "timestamp")
+                            && std::mem::take(&mut retimed) => {}
+                    // PI answers a device it does not know with a bare 404.
+                    Error::Api(e) if e.status == 404 => {
+                        log::warn!("PI does not know this device; activating again");
+                        self.forget_device(ops)?;
                         return self.activate(ops);
                     }
                     _ => {
@@ -169,74 +217,53 @@ impl Account {
         })
     }
 
-    fn refresh_once(&self, ops: &mut Ops) -> Result<(), Error> {
+    fn refresh_once(&self, ops: &mut Ops, device_id: &str) -> Result<(), Error> {
         let device = self.ensure_device(ops)?;
-        let device_id = self
-            .view()
-            .session
-            .device_id
-            .clone()
-            .ok_or(Error::ActivationBlocked)?;
-        let nonce = self.challenge(ops, "refresh", &device)?;
-        let proof = self.proof(&device, &nonce, "refresh", Some(&device_id))?;
-        let url = self.cfg.contract_url("/v1/licenses/refresh");
-        let reply = self.api_post(
-            ops,
-            &url,
-            &json!({
-                "device_id": device_id,
-                "installation_id": device.installation_id,
-                "product_id": self.cfg.product.id(),
-                "platform": self.cfg.platform.id(),
-                "client_version": self.cfg.client_version,
-                "signed_challenge": proof,
-            }),
-        )?;
-        match reply.json::<RefreshResponse>()? {
-            RefreshResponse::Active(response) => self.accept_lease(ops, &device, &response, &nonce),
-            RefreshResponse::Revoked { reason } => self.revoked(ops, &reason),
-        }
+        let url = self.cfg.pi_url("/licenses/refresh");
+        let mut nonce = String::new();
+        let reply = self.authorized(ops, |ops, token| {
+            self.http.retrying(Retry::Idempotent, || {
+                // Each send gets its own timestamp and nonce: PI may have stored the timestamp
+                // of a send whose reply never arrived.
+                let (body, sent) = self.refresh_body(ops, &device, device_id)?;
+                nonce = sent;
+                let key = random::uuid_v4()?;
+                self.http.post(&url, Some(token), &Body::Json(&body), &key)
+            })
+        })?;
+        let response: LeaseResponse = reply.json()?;
+        self.accept_lease(ops, &device, &response, &nonce)
     }
 
-    fn challenge(&self, ops: &mut Ops, purpose: &str, device: &Device) -> Result<String, Error> {
-        let url = self.cfg.contract_url("/v1/devices/challenges");
-        let reply = self.api_post(
-            ops,
-            &url,
-            &json!({
-                "purpose": purpose,
-                "installation_id": device.installation_id,
-                "product_id": self.cfg.product.id(),
-            }),
-        )?;
-        let c: Challenge = reply.json()?;
-        let well_formed = c.nonce.len() == 43
-            && c.nonce
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-        if !well_formed {
-            return Err(Error::BadResponse("challenge nonce".into()));
-        }
-        Ok(c.nonce)
-    }
-
-    fn proof(
+    /// Signed refresh body and its nonce. The timestamp follows PI's clock, stays above the last
+    /// one sent, and is in `session.json` before the body leaves.
+    fn refresh_body(
         &self,
+        ops: &mut Ops,
         device: &Device,
-        nonce: &str,
-        purpose: &str,
-        device_id: Option<&str>,
-    ) -> Result<String, Error> {
-        device.proof(&ProofClaims {
-            nonce,
-            purpose,
-            device_id,
-            installation_id: &device.installation_id,
-            product_id: self.cfg.product.id(),
-            platform: self.cfg.platform.id(),
-            client_version: &self.cfg.client_version,
-            iat: self.cfg.clock.unix_now(),
-        })
+        device_id: &str,
+    ) -> Result<(Vec<u8>, String), Error> {
+        let product = self.cfg.product.id();
+        let mut s = self
+            .read_session_disk(ops)
+            .unwrap_or_else(|| self.view().session.clone());
+        let server_now = self.cfg.clock.unix_now() + self.server_offset.load(Ordering::SeqCst);
+        let above_last = s
+            .last_refresh_ts
+            .get(product)
+            .map_or(i64::MIN, |t| t.saturating_add(1));
+        let timestamp = server_now.max(above_last);
+        s.last_refresh_ts.insert(product.to_owned(), timestamp);
+        self.write_session(ops, &mut s, Floor::Max)?;
+        let nonce = random::token()?;
+        let body = json!({
+            "deviceId": device_id,
+            "timestamp": timestamp,
+            "signature": device.sign(&refresh_message(device_id, timestamp, &nonce)),
+            "nonce": nonce,
+        });
+        let bytes = serde_json::to_vec(&body).map_err(|e| Error::Internal(e.to_string()))?;
+        Ok((bytes, nonce))
     }
 
     /// lease.md §9 on receipt; any failure leaves the previous lease in place.
@@ -248,18 +275,18 @@ impl Account {
         nonce: &str,
     ) -> Result<(), Error> {
         if r.lease.len() > MAX_JWS {
-            return Err(Error::Lease(crate::VerifyError::Format));
+            return Err(Error::Lease(VerifyError::Format));
         }
+        let product = self.cfg.product;
         let session = self.view().session.clone();
         let sub = session.user_id.as_deref().ok_or(Error::NotSignedIn)?;
         let jkt = device.thumbprint();
         let expect = Expect {
             issuer: &self.cfg.issuer,
             audience: &self.cfg.client_id,
-            product: self.cfg.product,
+            product,
             sub,
             org: session.org_context.as_deref(),
-            installation_id: &device.installation_id,
             jkt: &jkt,
             device_id: &r.device_id,
             nonce: Some(nonce),
@@ -275,55 +302,33 @@ impl Account {
         lease.window(now).map_err(|e| self.rejected(e))?;
         lease
             .check_copies(&Copies {
-                entitlement_ids: &r.entitlement_ids,
+                entitlement_id: r.entitlement_id.as_deref(),
                 rights: &r.rights,
                 offline_valid_until: &r.offline_valid_until,
                 policy_version: &r.policy_version,
+                lease_id: &r.lease_id,
             })
             .map_err(|e| self.rejected(e))?;
         let mut s = self.read_session_disk(ops).unwrap_or(session);
-        if s.device_id.as_deref() != Some(r.device_id.as_str()) {
-            if s.device_id.is_some() {
-                // Step 9: the stored device id is stale, and so are leases naming it.
-                self.remove_leases(Some(self.cfg.product))?;
-            }
-            s.device_id = Some(r.device_id.clone());
-        }
+        s.device_ids
+            .insert(product.id().to_owned(), r.device_id.clone());
+        s.not_entitled.remove(product.id());
         s.device_cap_reached = false;
-        self.write_lease(device, self.cfg.product, &r.lease, Vec::new())?;
         let floor = if corrected { Floor::Exact } else { Floor::Max };
+        // The device id is stored first: on load, a lease without one is deleted as stale.
         self.write_session(ops, &mut s, floor)?;
+        self.write_lease(device, product, &r.lease, Vec::new())?;
         self.load_leases(ops)
     }
 
-    fn rejected(&self, e: crate::VerifyError) -> Error {
+    fn rejected(&self, e: VerifyError) -> Error {
         log::warn!("lease rejected on receipt: {e:?}; previous lease kept");
         Error::Lease(e)
     }
 
-    /// `status: revoked` concerns the device: every lease goes, then per reason (lease.md §8).
-    fn revoked(&self, ops: &mut Ops, reason: &str) -> Result<(), Error> {
-        let reason = match reason {
-            "membership_revoked" => RevocationReason::MembershipRevoked,
-            "user_suspended" => RevocationReason::UserSuspended,
-            _ => RevocationReason::DeviceRevoked,
-        };
-        log::warn!("lease refresh reported revocation: {reason:?}");
-        self.remove_leases(None)?;
-        match reason {
-            RevocationReason::DeviceRevoked => self.update_session(ops, |s| {
-                s.device_id = None;
-                s.device_revoked = true;
-            })?,
-            // PI cannot move a token family to the personal context; the user signs in again.
-            RevocationReason::MembershipRevoked => self.view_mut().reauth = true,
-            RevocationReason::UserSuspended => self.wipe(ops, false)?,
-        }
-        Err(Error::Revoked(reason))
-    }
-
-    /// Device-specific actions of the contract error table.
+    /// Device-specific actions for PI's activation and refresh errors.
     fn on_device_error(&self, ops: &mut Ops, error: &Error) -> Result<(), Error> {
+        let product = self.cfg.product;
         match error.api_code() {
             Some(ApiCode::DeviceCapReached) => {
                 self.update_session(ops, |s| s.device_cap_reached = true)
@@ -331,15 +336,27 @@ impl Account {
             Some(ApiCode::DeviceRevoked) => {
                 self.remove_leases(None)?;
                 self.update_session(ops, |s| {
-                    s.device_id = None;
+                    s.device_ids.clear();
                     s.device_revoked = true;
                 })
             }
-            Some(ApiCode::DeviceUnknown) => {
-                self.remove_leases(None)?;
-                self.update_session(ops, |s| s.device_id = None)
+            Some(ApiCode::NoEntitlement | ApiCode::NoSeat | ApiCode::OrgContextRequired) => {
+                log::warn!("PI holds no plan or seat for {}", product.id());
+                self.remove_lease(product)?;
+                self.update_session(ops, |s| {
+                    s.not_entitled.insert(product.id().to_owned());
+                })
             }
             _ => Ok(()),
         }
+    }
+
+    /// PI no longer knows this product's device: its id and lease go.
+    fn forget_device(&self, ops: &mut Ops) -> Result<(), Error> {
+        let product = self.cfg.product;
+        self.remove_lease(product)?;
+        self.update_session(ops, |s| {
+            s.device_ids.remove(product.id());
+        })
     }
 }

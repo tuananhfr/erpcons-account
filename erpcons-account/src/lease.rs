@@ -1,43 +1,46 @@
-//! Offline lease verification (lease.md §4, §9).
+//! Offline verification of PI's device lease (lease.md §4, §9; ADR 0012).
 use std::collections::BTreeSet;
 
 use serde_json::{Map, Value};
 
-use crate::{PinnedKey, Product, VerifyError, catalog, jose, time};
+use crate::{PinnedKey, Product, VerifyError, jose, pi_device::compose_features, time};
 
 pub(crate) const LEASE_TYP: &str = "pi-lease+jwt";
 const MAX_WINDOW: i64 = 7_776_000;
-const CLAIMS: [&str; 16] = [
+const CLAIMS: [&str; 15] = [
     "iss",
-    "aud",
-    "lease_id",
+    "jti",
     "sub",
     "org",
-    "device_id",
-    "installation_id",
-    "cnf",
+    "tenant",
     "product",
+    "device",
+    "cnf",
     "features",
-    "entitlement_ids",
-    "nbf",
-    "iat",
-    "exp",
-    "nonce",
     "policy_version",
+    "nonce",
+    "iat",
+    "nbf",
+    "exp",
+    "aud",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Lease {
+    /// `jti`.
     pub lease_id: String,
     pub sub: String,
-    pub org: Option<String>,
+    pub org: String,
+    /// `device`.
     pub device_id: String,
+    pub tenant: String,
     pub product: Product,
+    /// `<product>.<code>`, without PI's internal codes.
     pub features: Vec<String>,
-    pub entitlement_ids: Vec<String>,
     pub nbf: i64,
     pub iat: i64,
     pub exp: i64,
+    /// `<planCode>@<planVersion>`, or empty.
     pub policy_version: String,
     pub jws: String,
 }
@@ -49,7 +52,6 @@ pub(crate) struct Expect<'a> {
     pub product: Product,
     pub sub: &'a str,
     pub org: Option<&'a str>,
-    pub installation_id: &'a str,
     pub jkt: &'a str,
     pub device_id: &'a str,
     pub nonce: Option<&'a str>,
@@ -57,10 +59,13 @@ pub(crate) struct Expect<'a> {
 
 /// Unsigned copies in an activation or refresh response (§9 step 12).
 pub(crate) struct Copies<'a> {
-    pub entitlement_ids: &'a [String],
+    /// Absent from a refresh response.
+    pub entitlement_id: Option<&'a str>,
+    /// Bare PI codes, composed like `features` before comparing.
     pub rights: &'a [String],
     pub offline_valid_until: &'a str,
     pub policy_version: &'a str,
+    pub lease_id: &'a str,
 }
 
 fn string<'a>(p: &'a Map<String, Value>, k: &str) -> Result<&'a str, VerifyError> {
@@ -90,8 +95,7 @@ pub(crate) fn verify(jws: &str, keys: &[PinnedKey], e: &Expect) -> Result<Lease,
         return Err(VerifyError::Claims);
     }
     let org = match p.get("org") {
-        Some(Value::Null) => None,
-        Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(Value::String(s)) if !s.is_empty() => s.clone(),
         _ => return Err(VerifyError::Claims),
     };
     let jkt = p
@@ -99,23 +103,23 @@ pub(crate) fn verify(jws: &str, keys: &[PinnedKey], e: &Expect) -> Result<Lease,
         .and_then(|c| c.get("jkt"))
         .and_then(Value::as_str)
         .ok_or(VerifyError::Claims)?;
-    let lease = Lease {
-        lease_id: string(&p, "lease_id")?.to_owned(),
+    let codes = strings(&p, "features")?;
+    let mut lease = Lease {
+        lease_id: string(&p, "jti")?.to_owned(),
         sub: string(&p, "sub")?.to_owned(),
         org,
-        device_id: string(&p, "device_id")?.to_owned(),
+        device_id: string(&p, "device")?.to_owned(),
+        tenant: string(&p, "tenant")?.to_owned(),
         product: Product::from_id(string(&p, "product")?).ok_or(VerifyError::Product)?,
-        features: strings(&p, "features")?,
-        entitlement_ids: strings(&p, "entitlement_ids")?,
+        features: Vec::new(),
         nbf: int(&p, "nbf")?,
         iat: int(&p, "iat")?,
         exp: int(&p, "exp")?,
         policy_version: string(&p, "policy_version")?.to_owned(),
         jws: jws.to_owned(),
     };
-    let installation_id = string(&p, "installation_id")?;
     let nonce = string(&p, "nonce")?;
-    if lease.lease_id.is_empty() || lease.policy_version.is_empty() {
+    if lease.lease_id.is_empty() {
         return Err(VerifyError::Claims);
     }
     if string(&p, "iss")? != e.issuer {
@@ -127,21 +131,12 @@ pub(crate) fn verify(jws: &str, keys: &[PinnedKey], e: &Expect) -> Result<Lease,
     if lease.product != e.product {
         return Err(VerifyError::Product);
     }
-    if !lease
-        .features
-        .iter()
-        .all(|f| catalog::belongs_to(f, e.product))
-    {
-        return Err(VerifyError::Feature);
-    }
+    lease.features = compose_features(e.product, &codes)?;
     if lease.sub != e.sub {
         return Err(VerifyError::Subject);
     }
-    if lease.org.as_deref() != e.org {
+    if Some(lease.org.as_str()) != e.org {
         return Err(VerifyError::Org);
-    }
-    if installation_id != e.installation_id {
-        return Err(VerifyError::Installation);
     }
     if jkt != e.jkt {
         return Err(VerifyError::KeyBinding);
@@ -174,10 +169,13 @@ impl Lease {
     /// Step 12: the response copies equal the signed claims.
     pub(crate) fn check_copies(&self, c: &Copies) -> Result<(), VerifyError> {
         let set = |v: &[String]| v.iter().cloned().collect::<BTreeSet<_>>();
-        if set(c.entitlement_ids) != set(&self.entitlement_ids)
-            || set(c.rights) != set(&self.features)
+        let rights =
+            compose_features(self.product, c.rights).map_err(|_| VerifyError::CopyMismatch)?;
+        if set(&rights) != set(&self.features)
+            || c.entitlement_id.is_some_and(|t| t != self.tenant)
             || time::parse_rfc3339(c.offline_valid_until) != Some(self.exp)
             || c.policy_version != self.policy_version
+            || c.lease_id != self.lease_id
         {
             return Err(VerifyError::CopyMismatch);
         }

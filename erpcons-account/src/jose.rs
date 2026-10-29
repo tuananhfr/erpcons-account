@@ -1,8 +1,8 @@
-//! Compact JWS with EdDSA, strict JSON and RFC 7638 thumbprints (lease.md §2, §3).
+//! Compact JWS verification with EdDSA, strict JSON and device-key thumbprints (lease.md §2, §3).
 use std::fmt;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
@@ -145,19 +145,6 @@ pub(crate) fn unverified_payload(jws: &str) -> Option<Map<String, Value>> {
     strict_object(&unb64(p64)?)
 }
 
-pub(crate) fn sign_compact(header: &str, payload: &str, key: &SigningKey) -> String {
-    let input = format!("{}.{}", b64(header.as_bytes()), b64(payload.as_bytes()));
-    let sig = key.sign(input.as_bytes());
-    format!("{input}.{}", b64(&sig.to_bytes()))
-}
-
-/// RFC 7638 SHA-256 thumbprint of an Ed25519 OKP key given its base64url `x`.
-pub(crate) fn thumbprint(x: &str) -> String {
-    let canonical = format!(r#"{{"crv":"Ed25519","kty":"OKP","x":"{x}"}}"#);
-    b64(&Sha256::digest(canonical.as_bytes()))
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
 /// Thumbprint PI computes for a device key: SHA-256 of the raw 32-byte public key.
 pub(crate) fn raw_key_thumbprint(key: &[u8; 32]) -> String {
     b64(&Sha256::digest(key))

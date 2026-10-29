@@ -57,7 +57,6 @@ pub(crate) fn parse_rfc3339(s: &str) -> Option<i64> {
     Some(days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + se - offset)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 /// IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`) to Unix seconds; other HTTP date forms are rejected.
 pub(crate) fn parse_http_date(s: &str) -> Option<i64> {
     const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];

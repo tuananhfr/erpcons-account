@@ -90,24 +90,6 @@ impl Resp {
         }
     }
 
-    pub(crate) fn problem(status: u16, code: &str, issuer: &str, cid: &str) -> Self {
-        let mut r = Self::json(
-            status,
-            &json!({
-                "type": format!("{issuer}/problems/{code}"),
-                "title": code.replace('_', " "),
-                "status": status,
-                "code": code,
-                "correlation_id": cid,
-            }),
-        );
-        r.headers[0].1 = "application/problem+json".into();
-        if status == 401 {
-            r = r.with_header("WWW-Authenticate", "Bearer error=\"invalid_token\"");
-        }
-        r
-    }
-
     /// PI's success envelope `{ok: true, ...}` (`ApiResponse::ok`).
     pub(crate) fn pi_ok(status: u16, mut data: Value) -> Self {
         if let Value::Object(map) = &mut data {

@@ -30,13 +30,13 @@ impl BuiltinFeature {
     }
 
     /// Office: `<product>.view`, `.export` and `.use`, all free (products.md §2).
-    /// UbotCAD: `cad.view` and `cad.export` free, `cad.use` pro.
+    /// UbotCAD: `cad-view` and `cad-export` free, `cad-use` pro (PI's plan codes).
     pub fn defaults(product: Product) -> Vec<Self> {
         let names: [(&str, Tier); 3] = match product {
             Product::UbotBuild => [
-                ("cad.view", Tier::Free),
-                ("cad.export", Tier::Free),
-                ("cad.use", Tier::Pro),
+                ("cad-view", Tier::Free),
+                ("cad-export", Tier::Free),
+                ("cad-use", Tier::Pro),
             ],
             _ => [
                 ("view", Tier::Free),
@@ -78,18 +78,10 @@ pub fn is_pinned_free(feature: &str) -> bool {
             .is_some_and(|(product, name)| product.pinned_free_suffixes().contains(&name))
 }
 
-pub(crate) fn belongs_to(feature: &str, product: Product) -> bool {
-    is_valid_feature_id(feature)
-        && feature
-            .split_once('.')
-            .is_some_and(|(p, _)| p == product.id())
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct Catalog {
     pub version: u64,
     pub tiers: HashMap<String, Tier>,
-    pub jws: String,
 }
 
 /// Accepts a catalog per products.md §3; `cached` is the version already held.
@@ -145,11 +137,7 @@ pub(crate) fn verify(
     if version < cached {
         return Err(VerifyError::Downgrade);
     }
-    Ok(Catalog {
-        version,
-        tiers,
-        jws: jws.to_owned(),
-    })
+    Ok(Catalog { version, tiers })
 }
 
 /// `tier(f)` of products.md §3; `None` for a feature this release does not gate.

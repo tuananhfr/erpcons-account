@@ -33,7 +33,7 @@ impl ApiCode {
     /// Known code for its status; an unknown or absent code falls back to its HTTP status.
     ///
     /// PI's error envelope `{ok:false, message, code?}` carries UPPERCASE codes (ADR 0011); the
-    /// lowercase ones are the Office contract's, still used by the licensing endpoints of pi-mock.
+    /// lowercase ones are the retired Office contract's, kept because this function is public.
     pub fn from_parts(status: u16, code: Option<&str>) -> Self {
         let known = match (status, code.unwrap_or("")) {
             (403, "INSUFFICIENT_SCOPE") => Some(Self::InsufficientScope),
@@ -127,7 +127,8 @@ pub enum VerifyError {
     Downgrade,
 }
 
-/// Reason in a `status: revoked` lease refresh.
+/// Reason of the Office contract's `status: revoked` refresh. PI never reports one: it answers
+/// 409 `DEVICE_REVOKED` instead (ADR 0012).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RevocationReason {
     DeviceRevoked,
@@ -163,7 +164,8 @@ pub enum Error {
     Catalog(VerifyError),
     /// Entitlements for another product or tenant; discarded (products.md §4).
     TenantIsolation,
-    /// Lease refresh reported the device revoked; local state was updated accordingly.
+    /// Lease refresh reported the device revoked. Not produced with PI, which yields
+    /// `Api` with [`ApiCode::DeviceRevoked`].
     Revoked(RevocationReason),
     /// Activation is blocked until the next sign-in or a user retry (lease.md §6).
     ActivationBlocked,

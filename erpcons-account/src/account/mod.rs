@@ -7,7 +7,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
     },
     time::Duration,
 };
@@ -45,6 +45,8 @@ pub struct Account {
     signing_in: AtomicBool,
     cancel: AtomicBool,
     refresh_wanted: AtomicBool,
+    /// PI's `Date` minus the system clock at the last API reply; refresh timestamps use it.
+    server_offset: AtomicI64,
 }
 
 /// State touched only by operations, serialized by `Account::ops`.
@@ -56,7 +58,6 @@ struct Ops {
     memory_refresh: Option<String>,
     device: Option<Device>,
     lock_held: bool,
-    catalog_fetched: Option<Duration>,
     /// `prompt=login` due after a sign-out that `session.json` could not record.
     login_prompt: bool,
 }
@@ -111,6 +112,7 @@ impl Account {
             signing_in: AtomicBool::new(false),
             cancel: AtomicBool::new(false),
             refresh_wanted: AtomicBool::new(false),
+            server_offset: AtomicI64::new(0),
             cfg: config,
         };
         {
@@ -209,16 +211,11 @@ impl Account {
         self.persist_floor(&mut ops, false)
     }
 
-    /// Start-up and periodic sync: tokens and identity, plus catalog, entitlements and lease when
+    /// Start-up and periodic sync: tokens and identity, plus entitlements and lease when
     /// [`Config::offline_licensing`] is on. Free features never depend on its outcome.
     pub fn refresh(&self) -> Result<(), Error> {
         let mut ops = lock(&self.ops);
         self.reload_with(&mut ops)?;
-        if self.cfg.offline_licensing
-            && let Err(e) = self.sync_catalog(&mut ops)
-        {
-            log::warn!("feature catalog not updated: {e}");
-        }
         let result = self.sync_signed_in(&mut ops);
         let _ = self.persist_floor(&mut ops, false);
         result
@@ -232,15 +229,19 @@ impl Account {
         self.wipe(&mut ops, true)
     }
 
-    /// Clears a `device_cap_reached` block and activates again (user action, lease.md §6).
-    /// Does nothing while [`Config::offline_licensing`] is off.
+    /// Clears a `device_cap_reached` or not-entitled block and activates again (user action,
+    /// lease.md §6). Does nothing while [`Config::offline_licensing`] is off.
     pub fn retry_activation(&self) -> Result<(), Error> {
         if !self.cfg.offline_licensing {
             return Ok(());
         }
         let mut ops = lock(&self.ops);
         self.reload_with(&mut ops)?;
-        self.update_session(&mut ops, |s| s.device_cap_reached = false)?;
+        let product = self.cfg.product.id();
+        self.update_session(&mut ops, |s| {
+            s.device_cap_reached = false;
+            s.not_entitled.remove(product);
+        })?;
         self.activate(&mut ops)
     }
 
@@ -258,7 +259,7 @@ impl Account {
             clock_rolled_back: lock(&self.time).rolled_back(),
             effective_now: now,
             installation_id: Some(view.session.installation_id.clone()).filter(|i| !i.is_empty()),
-            device_id: view.session.device_id.clone(),
+            device_id: view.session.device_ids.get(self.cfg.product.id()).cloned(),
         }
     }
 
@@ -304,6 +305,7 @@ impl Account {
                 lease_id: slot.lease.lease_id.clone(),
                 expires_at: slot.lease.exp,
             },
+            None if view.session.not_entitled.contains(p.id()) => LicenceState::NotEntitled,
             None if view.session.device_cap_reached => LicenceState::DeviceCapReached,
             None => LicenceState::NotActivated,
         }

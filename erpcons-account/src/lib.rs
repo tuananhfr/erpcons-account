@@ -1,6 +1,7 @@
-//! PI account client for the ERPCons Office desktop apps: OIDC sign-in with PI ID, the shared
-//! desktop session, organization context and `allowed(feature)`. Device activation and offline
-//! leases are kept behind [`Config::offline_licensing`], off until PI serves them (ADR 0011).
+//! PI account client for the ERPCons Office desktop apps and UbotCAD: OIDC sign-in with PI ID,
+//! the shared desktop session, organization context and `allowed(feature)`. Device activation
+//! and offline leases speak PI's device protocol behind [`Config::offline_licensing`], which
+//! only UbotCAD turns on (ADR 0012).
 //!
 //! Blocking API meant for a worker thread. Specification: `docs/` of this repository.
 #[cfg(target_arch = "wasm32")]
@@ -20,7 +21,6 @@ mod lease;
 mod loopback;
 mod me;
 mod oidc;
-#[cfg_attr(not(test), allow(dead_code))]
 mod pi_device;
 mod random;
 mod secrets;

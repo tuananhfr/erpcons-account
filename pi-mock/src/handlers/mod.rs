@@ -1,34 +1,22 @@
-//! Routing, faults and idempotency. PI's own paths (`/id/*`, `/api/v1/id/*`) answer as PI does;
-//! `/v1/*` are the Office contract's licensing endpoints, which PI does not have (ADR 0011).
+//! Routing and faults. Every path (`/id/*`, `/api/v1/id/*`) answers as PI does.
 mod api;
 pub(crate) mod bearer;
-mod contract;
-mod devices;
 mod oidc;
 mod pi_devices;
 
 use std::time::Duration;
 
-use serde_json::json;
-
 use crate::{
-    FaultAction, Shared, crypto,
+    FaultAction, Shared,
     http::{Req, Resp},
-    state::{Auth, Idempotency, RecordedRequest, State, Stored},
+    state::{RecordedRequest, State},
 };
 
 pub(crate) const API_PREFIX: &str = "/api/";
-pub(crate) const CONTRACT_PREFIX: &str = "/v1/";
 
 pub(crate) struct Ctx<'a> {
     pub issuer: &'a str,
     pub cid: &'a str,
-}
-
-impl Ctx<'_> {
-    pub(crate) fn problem(&self, status: u16, code: &str) -> Resp {
-        Resp::problem(status, code, self.issuer, self.cid)
-    }
 }
 
 /// Paths where PI's `CorsSubscriber` applies.
@@ -53,7 +41,7 @@ pub(crate) fn handle(shared: &Shared, req: &Req, cid: &str) -> (Resp, Option<Dur
         cid,
     };
     if req.method == "OPTIONS" {
-        if !pi_cors_path(&req.path) && !req.path.starts_with(CONTRACT_PREFIX) {
+        if !pi_cors_path(&req.path) {
             return (Resp::text(405, ""), None);
         }
         let resp = Resp::text(204, "")
@@ -87,11 +75,8 @@ pub(crate) fn handle(shared: &Shared, req: &Req, cid: &str) -> (Resp, Option<Dur
     (route(&mut st, &ctx, req), delay)
 }
 
-/// An injected error in the format of the path's owner.
+/// An injected error in PI's envelope.
 fn fault(ctx: &Ctx, path: &str, status: u16, code: &str) -> Resp {
-    if path.starts_with(CONTRACT_PREFIX) {
-        return ctx.problem(status, code);
-    }
     let mut resp = Resp::pi_status(status);
     let mut body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
     if !code.is_empty() {
@@ -121,68 +106,7 @@ fn route(st: &mut State, ctx: &Ctx, req: &Req) -> Resp {
         ("POST", "/api/v1/id/devices/activate") => pi_devices::activate(st, ctx, req),
         ("POST", "/api/v1/id/licenses/refresh") => pi_devices::refresh(st, ctx, req),
         ("GET", "/api/v1/id/me/entitlements") => pi_devices::entitlements(st, req),
-        ("GET", "/v1/me/entitlements") => contract::entitlements(st, ctx, req),
-        ("GET", p) if p.starts_with("/v1/products/") && p.ends_with("/feature-catalog") => {
-            contract::catalog(st, ctx, p)
-        }
-        ("POST", "/v1/devices/challenges") => idempotent(st, ctx, req, false, devices::challenge),
-        ("POST", "/v1/devices/activate") => idempotent(st, ctx, req, false, devices::activate),
-        ("POST", "/v1/licenses/refresh") => idempotent(st, ctx, req, true, devices::refresh),
         (_, p) if p.starts_with(API_PREFIX) => Resp::pi_status(404),
-        (_, p) if p.starts_with(CONTRACT_PREFIX) => ctx.problem(404, "not_found"),
         _ => Resp::html(404, "Không tìm thấy", "Không tìm thấy trang."),
     }
-}
-
-type Handler = fn(&mut State, &Ctx, &Req, &Auth) -> Resp;
-
-/// `Idempotency-Key` semantics of the Office contract: same key and body replays, another body
-/// is 422 (contract §2).
-fn idempotent(st: &mut State, ctx: &Ctx, req: &Req, lenient: bool, handler: Handler) -> Resp {
-    let auth = match bearer::check(st, req, "pi.devices", lenient) {
-        Ok(a) => a,
-        Err(denied) => return denied.problem(ctx),
-    };
-    let Some(key) = req.header("Idempotency-Key").map(str::to_owned) else {
-        return ctx.problem(400, "idempotency_key_missing");
-    };
-    let slot = (auth.user_id.clone(), req.path.clone(), key);
-    let hash = crypto::sha256(&req.body);
-    match st.idempotency.get(&slot) {
-        Some(r) if r.body_hash != hash => return ctx.problem(422, "idempotency_key_reused"),
-        Some(Idempotency {
-            response: Some(stored),
-            ..
-        }) => {
-            let mut resp = Resp::json(stored.status, &json!(null));
-            resp.body = stored.body.clone();
-            if stored.status >= 400 {
-                resp.headers[0].1 = "application/problem+json".into();
-            }
-            return resp;
-        }
-        Some(_) => {
-            return ctx
-                .problem(409, "idempotency_in_progress")
-                .with_header("Retry-After", "1");
-        }
-        None => {}
-    }
-    st.idempotency.insert(
-        slot.clone(),
-        Idempotency {
-            body_hash: hash,
-            response: None,
-        },
-    );
-    let resp = handler(st, ctx, req, &auth);
-    if resp.status >= 500 || resp.status == 429 {
-        st.idempotency.remove(&slot);
-    } else if let Some(rec) = st.idempotency.get_mut(&slot) {
-        rec.response = Some(Stored {
-            status: resp.status,
-            body: resp.body.clone(),
-        });
-    }
-    resp
 }

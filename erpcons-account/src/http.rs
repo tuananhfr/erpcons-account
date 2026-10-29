@@ -23,7 +23,6 @@ pub(crate) struct Reply {
     pub correlation_id: String,
     pub retry_after: Option<Duration>,
     /// Unix seconds of the `Date` header.
-    #[allow(dead_code)]
     pub(crate) date: Option<i64>,
 }
 

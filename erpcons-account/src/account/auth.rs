@@ -1,29 +1,25 @@
 //! Sign-in and organization switch through the browser, token rotation, authorized API calls,
-//! identity from PI's `/me` (ADR 0011), and the Office-contract entitlements and catalog
-//! (products.md §3 and §4) used only with `offline_licensing`.
+//! identity from PI's `/me` (ADR 0011), and PI's entitlements (products.md §4) used only with
+//! `offline_licensing`.
 use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
-
-use serde::Deserialize;
 
 use super::{
     Access, Account, Ops,
     shared::{Floor, Profile, SessionFile, store_error},
 };
 use crate::{
-    ApiCode, ApiError, Error, MembershipStatus, Product, catalog, entitlements,
-    http::{Body, Reply, Retry},
+    ApiCode, ApiError, Error, MembershipStatus, entitlements,
+    http::{Body, Reply, Retry, query_escape},
     loopback::{Loopback, Pages},
     me::{self, Me},
     oidc::{self, AuthorizeRequest, Discovery, Tokens},
     random,
     secrets::REFRESH_TOKEN_ENTRY,
-    storage,
 };
 
-const CATALOG_EVERY: Duration = Duration::from_secs(86_400);
 const ACCESS_MARGIN: Duration = Duration::from_secs(30);
 
 struct ClearOnDrop<'a>(&'a AtomicBool);
@@ -248,9 +244,6 @@ impl Account {
         if !self.cfg.offline_licensing {
             return Ok(());
         }
-        if let Err(e) = self.sync_catalog(ops) {
-            log::warn!("feature catalog not updated: {e}");
-        }
         self.fetch_entitlements(ops)?;
         self.sync_licence(ops)
     }
@@ -292,11 +285,14 @@ impl Account {
             let mut s = SessionFile {
                 user_id: Some(me.user_id.clone()),
                 org_context: me.org_context.clone(),
-                device_id: previous.device_id.filter(|_| same),
                 trusted_floor: previous.trusted_floor,
                 profile: Some(profile),
                 ..SessionFile::default()
             };
+            if same {
+                s.device_ids = previous.device_ids;
+                s.last_refresh_ts = previous.last_refresh_ts;
+            }
             self.write_session(ops, &mut s, Floor::Max)?;
             self.reload_with(ops)
         })
@@ -380,17 +376,19 @@ impl Account {
     }
 
     /// Bearer call: refresh once on 401 and retry (contract §3), then the generic error actions.
-    fn authorized(
+    pub(super) fn authorized(
         &self,
         ops: &mut Ops,
-        mut call: impl FnMut(&str) -> Result<Reply, Error>,
+        mut call: impl FnMut(&mut Ops, &str) -> Result<Reply, Error>,
     ) -> Result<Reply, Error> {
         let token = self.access_token(ops)?;
-        let mut reply = call(&token).inspect_err(|e| self.note(e))?;
+        let mut reply = call(ops, &token).inspect_err(|e| self.note(e))?;
+        self.note_date(&reply);
         if reply.status == 401 {
             ops.access = None;
             let token = self.access_token(ops)?;
-            reply = call(&token).inspect_err(|e| self.note(e))?;
+            reply = call(ops, &token).inspect_err(|e| self.note(e))?;
+            self.note_date(&reply);
         }
         self.view_mut().online = true;
         if reply.ok() {
@@ -401,8 +399,16 @@ impl Account {
         Err(error)
     }
 
+    /// Keeps PI's clock offset from a reply's `Date`, for refresh timestamps.
+    fn note_date(&self, reply: &Reply) {
+        if let Some(date) = reply.date {
+            let offset = date - self.cfg.clock.unix_now();
+            self.server_offset.store(offset, Ordering::SeqCst);
+        }
+    }
+
     pub(super) fn api_get(&self, ops: &mut Ops, url: &str) -> Result<Reply, Error> {
-        self.authorized(ops, |token| {
+        self.authorized(ops, |_, token| {
             self.http
                 .retrying(Retry::Idempotent, || self.http.get(url, Some(token)))
         })
@@ -417,7 +423,7 @@ impl Account {
     ) -> Result<Reply, Error> {
         let bytes = serde_json::to_vec(body).map_err(|e| Error::Internal(e.to_string()))?;
         let key = random::uuid_v4()?;
-        self.authorized(ops, |token| {
+        self.authorized(ops, |_, token| {
             self.http.retrying(Retry::Idempotent, || {
                 self.http.post(url, Some(token), &Body::Json(&bytes), &key)
             })
@@ -464,9 +470,11 @@ impl Account {
             let mut s = self.read_session_disk(ops).unwrap_or_default();
             if s.user_id.as_deref() != Some(me.user_id.as_str()) || s.org_context != me.org_context
             {
-                // A different sub or context makes every lease and the device id stale (§8).
+                // A different sub or context makes every lease and device id stale (§8).
                 self.remove_leases(None)?;
-                s.device_id = None;
+                s.device_ids.clear();
+                s.last_refresh_ts.clear();
+                s.not_entitled.clear();
                 s.device_revoked = false;
                 s.device_cap_reached = false;
                 self.view_mut().entitlements = None;
@@ -479,61 +487,23 @@ impl Account {
         })
     }
 
+    /// PI's entitlement rows for this product in the token's organization; the personal
+    /// context holds none, since PI grants products to organizations.
     pub(super) fn fetch_entitlements(&self, ops: &mut Ops) -> Result<(), Error> {
         let product = self.cfg.product;
-        let url = self
-            .cfg
-            .contract_url(&format!("/v1/me/entitlements?product_id={}", product.id()));
-        let reply = self.api_get(ops, &url)?;
         let org = self.view().session.org_context.clone();
-        let list = entitlements::parse(&reply.body, product, org.as_deref())?;
+        let list = match org {
+            None => Vec::new(),
+            Some(org) => {
+                let url = self.cfg.pi_url(&format!(
+                    "/me/entitlements?product_id={}",
+                    query_escape(product.id())
+                ));
+                let reply = self.api_get(ops, &url)?;
+                entitlements::parse(&reply.body, product, &org)?
+            }
+        };
         self.view_mut().entitlements = Some((list, self.mono()));
-        Ok(())
-    }
-
-    /// Fetches the signed catalog at most once a day, guests included (products.md §3).
-    pub(super) fn sync_catalog(&self, ops: &mut Ops) -> Result<(), Error> {
-        #[derive(Deserialize)]
-        struct Response {
-            catalog: String,
-        }
-        let now = self.mono();
-        if ops
-            .catalog_fetched
-            .is_some_and(|t| now.saturating_sub(t) < CATALOG_EVERY)
-        {
-            return Ok(());
-        }
-        let product: Product = self.cfg.product;
-        let url = self
-            .cfg
-            .contract_url(&format!("/v1/products/{}/feature-catalog", product.id()));
-        let reply = self
-            .http
-            .retrying(Retry::Idempotent, || self.http.get(&url, None))
-            .inspect_err(|e| self.note(e))?;
-        self.view_mut().online = true;
-        if !reply.ok() {
-            return Err(reply.error());
-        }
-        ops.catalog_fetched = Some(now);
-        let response: Response = reply.json()?;
-        let cached = self.view().catalog.as_ref().map_or(0, |c| c.version);
-        let fetched = catalog::verify(
-            &response.catalog,
-            &self.cfg.platform_keys,
-            &self.cfg.issuer,
-            product,
-            cached,
-        )
-        .map_err(Error::Catalog)?;
-        if self.view().catalog.is_some() && fetched.version == cached {
-            return Ok(());
-        }
-        self.locked(ops, |_| {
-            storage::write_atomic(&self.paths.catalog(product), fetched.jws.as_bytes())
-        })?;
-        self.view_mut().catalog = Some(fetched);
         Ok(())
     }
 

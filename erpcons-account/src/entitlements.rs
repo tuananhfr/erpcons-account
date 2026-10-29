@@ -1,43 +1,81 @@
-//! Online entitlement list of the Office contract and its tenant-isolation sanity check
-//! (products.md §4). PI's `/me/entitlements` has another shape; not called (ADR 0011).
+//! PI's `/me/entitlements` rows for the token's organization and their tenant-isolation sanity
+//! check (products.md §4).
 use serde::Deserialize;
 
-use crate::{Error, Product};
+use crate::{Error, Product, pi_device::compose_features};
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug)]
 pub(crate) struct Entitlement {
-    pub product_id: String,
+    /// `<product>.<code>`.
     pub feature: String,
-    pub org_id: Option<String>,
     pub offline_allowed: bool,
 }
 
 #[derive(Deserialize)]
-struct EntitlementList {
-    product_id: String,
-    org_context: Option<String>,
-    entitlements: Vec<Entitlement>,
+struct List {
+    items: Vec<Row>,
 }
 
-/// Parses an entitlement list; another product's or tenant's data discards the whole response.
-pub(crate) fn parse(
-    body: &[u8],
-    product: Product,
-    org_context: Option<&str>,
-) -> Result<Vec<Entitlement>, Error> {
-    let list: EntitlementList =
-        serde_json::from_slice(body).map_err(|e| Error::BadResponse(e.to_string()))?;
-    let foreign = list.product_id != product.id()
-        || list.org_context.as_deref() != org_context
-        || list.entitlements.iter().any(|e| {
-            e.product_id != product.id()
-                || e.org_id.as_deref().is_some_and(|o| Some(o) != org_context)
-        });
+#[derive(Deserialize)]
+struct Row {
+    organization: Id,
+    tenant: TenantRef,
+    decision: String,
+    #[serde(default)]
+    seat: bool,
+    #[serde(default)]
+    features: Vec<Code>,
+    offline: Option<Offline>,
+}
+
+#[derive(Deserialize)]
+struct Id {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct TenantRef {
+    product: String,
+}
+
+#[derive(Deserialize)]
+struct Code {
+    code: String,
+}
+
+#[derive(Deserialize)]
+struct Offline {
+    allowed: bool,
+}
+
+/// Features of the rows that grant `product` in `org` (`ALLOW` with a seat); a row of another
+/// product or organization discards the whole response.
+pub(crate) fn parse(body: &[u8], product: Product, org: &str) -> Result<Vec<Entitlement>, Error> {
+    let list: List = serde_json::from_slice(body).map_err(|e| Error::BadResponse(e.to_string()))?;
+    let foreign = list
+        .items
+        .iter()
+        .any(|r| r.organization.id != org || r.tenant.product != product.id());
     if foreign {
         log::error!(
             "tenant isolation incident: entitlements for another product or tenant discarded"
         );
         return Err(Error::TenantIsolation);
     }
-    Ok(list.entitlements)
+    let mut granted = Vec::new();
+    for row in list
+        .items
+        .iter()
+        .filter(|r| r.decision == "ALLOW" && r.seat)
+    {
+        let codes: Vec<String> = row.features.iter().map(|f| f.code.clone()).collect();
+        let offline_allowed = row.offline.as_ref().is_some_and(|o| o.allowed);
+        let features = compose_features(product, &codes)
+            .map_err(|_| Error::BadResponse("entitlement feature code".into()))?;
+        granted.extend(features.into_iter().map(|feature| Entitlement {
+            feature,
+            offline_allowed,
+        }));
+    }
+    Ok(granted)
 }

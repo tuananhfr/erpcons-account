@@ -1,7 +1,7 @@
-//! JWS, thumbprints, random values and RFC 3339 times; an implementation independent of the
+//! JWS, hashes, random values and RFC 3339 times; an implementation independent of the
 //! client's, so contract tests compare two readings of the docs.
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -44,44 +44,6 @@ pub(crate) fn uuid() -> String {
         &h[16..20],
         &h[20..]
     )
-}
-
-pub(crate) fn sign(header: &Value, payload: &Value, key: &SigningKey) -> String {
-    let input = format!(
-        "{}.{}",
-        b64(header.to_string().as_bytes()),
-        b64(payload.to_string().as_bytes())
-    );
-    let sig = key.sign(input.as_bytes());
-    format!("{input}.{}", b64(&sig.to_bytes()))
-}
-
-pub(crate) fn thumbprint(x: &str) -> String {
-    sha256_b64(format!(r#"{{"crv":"Ed25519","kty":"OKP","x":"{x}"}}"#).as_bytes())
-}
-
-/// Verified device proof: `(jwk x, payload)` (lease.md §3).
-pub(crate) fn verify_proof(jws: &str) -> Option<(String, Value)> {
-    let parts: Vec<&str> = jws.split('.').collect();
-    let [h, p, s] = parts.as_slice() else {
-        return None;
-    };
-    let header: Value = serde_json::from_slice(&unb64(h)?).ok()?;
-    if header["alg"] != "EdDSA" || header["typ"] != "pi-device-proof+jwt" {
-        return None;
-    }
-    let jwk = header.get("jwk")?;
-    if jwk["kty"] != "OKP" || jwk["crv"] != "Ed25519" || jwk.get("d").is_some() {
-        return None;
-    }
-    let x = jwk["x"].as_str()?;
-    let key: [u8; 32] = unb64(x)?.try_into().ok()?;
-    let key = VerifyingKey::from_bytes(&key).ok()?;
-    let sig = Signature::from_slice(&unb64(s)?).ok()?;
-    key.verify_strict(format!("{h}.{p}").as_bytes(), &sig)
-        .ok()?;
-    let payload: Value = serde_json::from_slice(&unb64(p)?).ok()?;
-    Some((x.to_owned(), payload))
 }
 
 pub(crate) fn rfc3339(t: i64) -> String {

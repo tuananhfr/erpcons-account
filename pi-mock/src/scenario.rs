@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
-/// `kid` of the development lease key (Office-contract leases, not PI's).
+/// `kid` of the development lease key that signs PI leases (`/id/lease-keys.json`).
 pub const DEV_LEASE_KID: &str = "pi-mock-dev-1";
 const DEV_SEED_LABEL: &[u8] = b"pi-mock development lease key; never pin in a release build";
 
@@ -47,15 +47,10 @@ pub struct Scenario {
     pub authorize: Authorize,
     /// What the user picks on PI's organization page: an `org_id`, or `None` for "personal".
     pub org_choice: Option<String>,
-    pub entitlements: Vec<Entitlement>,
     /// PI tenants (organization x product) served by the device protocol under `/api/v1/id/`.
     pub tenants: Vec<Tenant>,
     /// PI's product registry (`ProductRegistry`); other codes are 422 on its device endpoints.
     pub products: Vec<String>,
-    /// Signed catalogs; a product without one gets version 1 with every feature free.
-    pub catalogs: Vec<Catalog>,
-    /// Device cap per user and organization context.
-    pub max_devices: usize,
     /// Fixed platform time (Unix seconds); `None` uses the system clock.
     pub now: Option<i64>,
     /// Access and ID token lifetime; PI: 600 s.
@@ -65,9 +60,6 @@ pub struct Scenario {
     pub lease_kid: String,
     pub lease_seed: [u8; 32],
     pub lease_tamper: Option<LeaseTamper>,
-    pub policy_version: String,
-    /// Minimum `client_version` (`412 client_version_unsupported` below it).
-    pub min_client_version: Option<(u64, u64, u64)>,
     /// Redirect URIs registered for `erpcons-office-web` (exact match).
     pub web_redirect_uris: Vec<String>,
     /// Registered clients besides the two Office ones, for example another product's.
@@ -91,7 +83,6 @@ impl Default for Scenario {
             sign_in_as: DEFAULT_USER.into(),
             authorize: Authorize::Approve,
             org_choice: None,
-            entitlements: Vec::new(),
             tenants: Vec::new(),
             products: [
                 "erpcons",
@@ -107,8 +98,6 @@ impl Default for Scenario {
             ]
             .map(str::to_owned)
             .to_vec(),
-            catalogs: Vec::new(),
-            max_devices: 3,
             now: None,
             access_token_ttl: 600,
             signing_keys: vec![JwtKey {
@@ -118,8 +107,6 @@ impl Default for Scenario {
             lease_kid: DEV_LEASE_KID.into(),
             lease_seed: dev_lease_seed(),
             lease_tamper: None,
-            policy_version: "2026-10-01.1".into(),
-            min_client_version: None,
             web_redirect_uris: vec!["https://office.erpcons.vn/dang-nhap/callback/".into()],
             extra_clients: Vec::new(),
             faults: Vec::new(),
@@ -191,51 +178,6 @@ impl Membership {
     }
 }
 
-/// Office-contract entitlement, feeding the contract's entitlement list and leases.
-#[derive(Clone, Debug)]
-pub struct Entitlement {
-    pub entitlement_id: String,
-    pub user_id: String,
-    /// `None`: a personal entitlement.
-    pub org_id: Option<String>,
-    pub product_id: String,
-    pub feature: String,
-    pub offline_allowed: bool,
-    pub offline_days: Option<u32>,
-    pub valid_from: i64,
-    pub valid_to: Option<i64>,
-    pub seats: Option<u32>,
-}
-
-impl Entitlement {
-    /// Offline entitlement (30 days) of `user` for `feature`, in `org` or personal.
-    pub fn new(id: &str, user: &str, org: Option<&str>, feature: &str) -> Self {
-        Self {
-            entitlement_id: id.into(),
-            user_id: user.into(),
-            org_id: org.map(str::to_owned),
-            product_id: feature.split('.').next().unwrap_or_default().into(),
-            feature: feature.into(),
-            offline_allowed: true,
-            offline_days: Some(30),
-            valid_from: 0,
-            valid_to: None,
-            seats: org.map(|_| 50),
-        }
-    }
-
-    pub fn offline_days(mut self, days: Option<u32>) -> Self {
-        self.offline_allowed = days.is_some();
-        self.offline_days = days;
-        self
-    }
-
-    pub fn valid_to(mut self, t: i64) -> Self {
-        self.valid_to = Some(t);
-        self
-    }
-}
-
 /// Features of the UbotBuild free plan (`UbotbuildMeta`); `offline` is PI-internal.
 pub const FREE_UBOTCAD: [&str; 4] = ["cad-view", "cad-export", "cad-use", "offline"];
 
@@ -293,14 +235,6 @@ impl Tenant {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct Catalog {
-    pub product_id: String,
-    pub version: u64,
-    /// `(feature, tier)`, tier `free` or `pro`.
-    pub features: Vec<(String, String)>,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Authorize {
     Approve,
@@ -348,8 +282,7 @@ pub struct Fault {
 
 #[derive(Clone, Debug)]
 pub enum FaultAction {
-    /// Error with `code` (empty: none). PI's envelope `{ok:false, message, code?}` on PI paths,
-    /// an RFC 9457 problem on the Office-contract `/v1/` paths.
+    /// PI's error envelope `{ok:false, message, code?}`; an empty `code` is left out.
     Problem {
         status: u16,
         code: String,

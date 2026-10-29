@@ -13,7 +13,7 @@ const CREATED: i64 = 1_767_225_600;
 
 /// `GET /api/v1/id/me` (scope `openid`): `email` comes whatever the scopes, as in PI.
 pub(super) fn me(st: &State, req: &Req) -> Resp {
-    let auth = match bearer::check(st, req, "openid", false) {
+    let auth = match bearer::check(st, req, "openid") {
         Ok(a) => a,
         Err(denied) => return denied.pi(),
     };

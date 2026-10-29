@@ -8,15 +8,18 @@ use std::{
     time::Duration,
 };
 
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use erpcons_account::{
     Account, BuiltinFeature, Clock, Config, MemorySecretStore, PinnedKey, Product,
     REFRESH_TOKEN_ENTRY, SecretStore, SignedIn, Status, Tier,
 };
-use pi_mock::{Catalog, Entitlement, Scenario, Server};
+use pi_mock::{FREE_UBOTCAD, ORG_A, RecordedRequest, Scenario, Server, Tenant};
 
 pub const T0: i64 = 1_792_828_800;
 pub const DAY: i64 = 86_400;
-pub const PRO: &str = "vanban.advanced";
+pub const PRO: &str = "ubotbuild.cad-use";
+pub const VIEW: &str = "ubotbuild.cad-view";
+pub const EXPORT: &str = "ubotbuild.cad-export";
 
 pub struct TestClock {
     unix: AtomicI64,
@@ -57,7 +60,7 @@ impl Env {
         Self::with_store(scenario, MemorySecretStore::new())
     }
 
-    /// With the Office contract's offline licensing turned on (pi-mock's `/v1/` endpoints).
+    /// With offline licensing turned on (PI's device protocol).
     pub fn licensing(scenario: Scenario) -> Self {
         let mut env = Self::new(scenario);
         env.licensing = true;
@@ -105,6 +108,11 @@ impl Env {
         Account::new(self.config(product), self.store.clone()).unwrap()
     }
 
+    /// UbotCAD, the app that turns licensing on.
+    pub fn cad(&self) -> Account {
+        self.account_for(Product::UbotBuild)
+    }
+
     /// Moves client wall clock, client monotonic clock and platform time together.
     pub fn advance(&self, secs: i64) {
         self.clock.advance(secs);
@@ -118,6 +126,26 @@ impl Env {
 
     pub fn file(&self, name: &str) -> PathBuf {
         self.dir.path().join(name)
+    }
+
+    /// Requests to `path`, oldest first.
+    pub fn requests_to(&self, path: &str) -> Vec<RecordedRequest> {
+        self.server
+            .requests()
+            .into_iter()
+            .filter(|r| r.path == path)
+            .collect()
+    }
+
+    /// Claims of the lease stored for `product`.
+    pub fn lease_claims(&self, product: &str) -> serde_json::Value {
+        let sealed = std::fs::read_to_string(self.file(&format!("lease-{product}.json"))).unwrap();
+        let body: serde_json::Value = serde_json::from_str(sealed.lines().next().unwrap()).unwrap();
+        let jws = body["lease"].as_str().unwrap();
+        let payload = URL_SAFE_NO_PAD
+            .decode(jws.split('.').nth(1).unwrap())
+            .unwrap();
+        serde_json::from_slice(&payload).unwrap()
     }
 
     pub fn count(&self, method: &str, path: &str) -> usize {
@@ -159,30 +187,33 @@ pub fn signed_in(status: Status) -> SignedIn {
     }
 }
 
-/// Catalog version 2 of vanban with `vanban.advanced` as `pro`.
-pub fn pro_catalog() -> Catalog {
-    Catalog {
-        product_id: "vanban".into(),
-        version: 2,
-        features: [
-            ("vanban.view", "free"),
-            ("vanban.export", "free"),
-            ("vanban.use", "free"),
-            (PRO, "pro"),
-        ]
-        .iter()
-        .map(|(f, t)| (f.to_string(), t.to_string()))
-        .collect(),
+pub const ACTIVATE: &str = "/api/v1/id/devices/activate";
+pub const CHALLENGE: &str = "/api/v1/id/devices/challenge";
+pub const REFRESH: &str = "/api/v1/id/licenses/refresh";
+pub const ENTITLEMENTS: &str = "/api/v1/id/me/entitlements";
+
+/// UbotBuild free plan of organization A.
+pub fn free_tenant() -> Tenant {
+    Tenant::new("ten_cad", ORG_A, "ubotbuild", &FREE_UBOTCAD)
+}
+
+/// Signed in to organization A, which holds the UbotBuild free plan.
+pub fn licensed() -> Scenario {
+    Scenario {
+        org_choice: Some(ORG_A.into()),
+        tenants: vec![free_tenant()],
+        ..Scenario::default()
     }
 }
 
-/// Default user holding `vanban.advanced` offline for `days`, in `org` or personal.
-pub fn pro_scenario(org: Option<&str>, days: u32) -> Scenario {
+/// Organization A's plan with `days`-day leases (pi-mock caps at 7 without `offline-extended`).
+pub fn pro_scenario(days: u32) -> Scenario {
+    let mut tenant = free_tenant().offline_days(days);
+    if days > 7 {
+        tenant.features.push("offline-extended".into());
+    }
     Scenario {
-        entitlements: vec![
-            Entitlement::new("ent_adv", pi_mock::DEFAULT_USER, org, PRO).offline_days(Some(days)),
-        ],
-        catalogs: vec![pro_catalog()],
-        ..Scenario::default()
+        tenants: vec![tenant],
+        ..licensed()
     }
 }

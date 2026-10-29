@@ -1,4 +1,4 @@
-//! Mutable platform state: codes, token families, nonces, devices, idempotency records.
+//! Mutable platform state: codes, token families, devices, challenges, idempotency records.
 use std::collections::{HashMap, HashSet};
 
 use crate::{
@@ -45,30 +45,6 @@ pub(crate) struct Auth {
     pub scope: String,
     /// `azp` of the access token.
     pub client_id: String,
-}
-
-pub(crate) struct NonceRecord {
-    pub user_id: String,
-    pub org: Option<String>,
-    pub installation_id: String,
-    pub product_id: String,
-    pub purpose: String,
-    pub expires: i64,
-    pub used: bool,
-}
-
-/// A registered device, one per (`installation_id`, `sub`, `org_context`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DeviceRecord {
-    pub device_id: String,
-    pub installation_id: String,
-    pub user_id: String,
-    pub org: Option<String>,
-    pub jkt: String,
-    /// Client that activated the device; the `aud` of its leases.
-    pub client_id: String,
-    pub revoked: bool,
-    pub products: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,8 +106,6 @@ pub(crate) struct State {
     pub codes: HashMap<String, Code>,
     pub refresh: HashMap<String, RefreshRecord>,
     pub revoked_families: HashSet<u64>,
-    pub nonces: HashMap<String, NonceRecord>,
-    pub devices: Vec<DeviceRecord>,
     pub pi_devices: Vec<DeviceRow>,
     pub challenges: HashMap<String, Challenge>,
     pub idempotency: HashMap<(String, String, String), Idempotency>,
@@ -148,8 +122,6 @@ impl State {
             codes: HashMap::new(),
             refresh: HashMap::new(),
             revoked_families: HashSet::new(),
-            nonces: HashMap::new(),
-            devices: Vec::new(),
             pi_devices: Vec::new(),
             challenges: HashMap::new(),
             idempotency: HashMap::new(),
@@ -169,11 +141,6 @@ impl State {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs() as i64)
         })
-    }
-
-    pub(crate) fn next_id(&mut self, prefix: &str) -> String {
-        self.counter += 1;
-        format!("{prefix}_{:06}", self.counter)
     }
 
     pub(crate) fn next_family(&mut self) -> u64 {

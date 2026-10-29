@@ -1,10 +1,8 @@
-//! Device key, `installation_id` and device proofs (lease.md §3).
+//! Device key and `installation_id` (lease.md §3), signing PI's device messages.
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use crate::{Error, jose, random};
-
-pub(crate) const PROOF_TYP: &str = "pi-device-proof+jwt";
 
 #[derive(Clone)]
 pub(crate) struct Device {
@@ -16,20 +14,6 @@ pub(crate) struct Device {
 struct Entry {
     installation_id: String,
     key: String,
-}
-
-/// Claims of `signed_challenge`, serialized in the contract's member order.
-#[derive(Serialize)]
-pub(crate) struct ProofClaims<'a> {
-    pub nonce: &'a str,
-    pub purpose: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub device_id: Option<&'a str>,
-    pub installation_id: &'a str,
-    pub product_id: &'a str,
-    pub platform: &'a str,
-    pub client_version: &'a str,
-    pub iat: i64,
 }
 
 impl Device {
@@ -57,18 +41,19 @@ impl Device {
         .to_string()
     }
 
+    /// Raw public key, base64url: PI's `devicePublicKey`.
     pub(crate) fn x(&self) -> String {
         jose::b64(self.key.verifying_key().as_bytes())
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     /// Detached Ed25519 signature over `message`, base64url without padding.
     pub(crate) fn sign(&self, message: &str) -> String {
         jose::b64(&self.key.sign(message.as_bytes()).to_bytes())
     }
 
+    /// The lease's `cnf.jkt` for this key.
     pub(crate) fn thumbprint(&self) -> String {
-        jose::thumbprint(&self.x())
+        jose::raw_key_thumbprint(self.key.verifying_key().as_bytes())
     }
 
     pub(crate) fn signing_key(&self) -> &SigningKey {
@@ -78,19 +63,4 @@ impl Device {
     pub(crate) fn verifying_key(&self) -> VerifyingKey {
         self.key.verifying_key()
     }
-
-    pub(crate) fn proof(&self, claims: &ProofClaims) -> Result<String, Error> {
-        let payload = serde_json::to_string(claims).map_err(|e| Error::Internal(e.to_string()))?;
-        Ok(jose::sign_compact(
-            &proof_header(&self.x()),
-            &payload,
-            &self.key,
-        ))
-    }
-}
-
-pub(crate) fn proof_header(x: &str) -> String {
-    format!(
-        r#"{{"alg":"EdDSA","typ":"{PROOF_TYP}","jwk":{{"kty":"OKP","crv":"Ed25519","x":"{x}"}}}}"#
-    )
 }

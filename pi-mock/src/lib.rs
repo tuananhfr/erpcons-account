@@ -1,11 +1,9 @@
 //! Mock of the real PI Platform (`pi_id`) as ERPCons Office uses it (ADR 0011): OIDC discovery,
 //! PKCE S256 authorization with `org_hint`, EdDSA access and ID tokens with `/id/jwks.json`,
 //! refresh rotation with family revocation on reuse, and `/api/v1/id/me` in PI's envelope.
-//! It serves PI's device protocol (`/api/v1/id/devices/*`, `licenses/refresh`, `me/entitlements`,
-//! `/id/lease-keys.json`) and also keeps the Office contract's licensing endpoints under `/v1/` (entitlements, signed
-//! feature catalogs, device activation, leases), which PI does not have, so the licensing code
-//! behind `Config::offline_licensing` stays testable. In-process for tests, or the `pi-mock`
-//! binary for manual and E2E runs.
+//! It also serves PI's device protocol (`/api/v1/id/devices/*`, `licenses/refresh`,
+//! `me/entitlements`, `/id/lease-keys.json`) behind `Config::offline_licensing` (ADR 0012).
+//! In-process for tests, or the `pi-mock` binary for manual and E2E runs.
 //!
 //! Its signing and lease keys are fixed development keys ([`dev_signing_seed`],
 //! [`dev_lease_public_key`]); release builds of the apps never trust them.
@@ -27,12 +25,11 @@ use std::{
 };
 
 pub use scenario::{
-    Authorize, Catalog, Client, DEFAULT_USER, DESKTOP_CLIENT, DEV_LEASE_KID, DEV_SIGNING_KID,
-    Entitlement, FREE_UBOTCAD, Fault, FaultAction, JwtKey, LeaseTamper, Membership, ORG_A, ORG_B,
-    Scenario, Tenant, UBOTCAD_CLIENT, User, WEB_CLIENT, dev_lease_public_key, dev_lease_seed,
-    dev_signing_seed,
+    Authorize, Client, DEFAULT_USER, DESKTOP_CLIENT, DEV_LEASE_KID, DEV_SIGNING_KID, FREE_UBOTCAD,
+    Fault, FaultAction, JwtKey, LeaseTamper, Membership, ORG_A, ORG_B, Scenario, Tenant,
+    UBOTCAD_CLIENT, User, WEB_CLIENT, dev_lease_public_key, dev_lease_seed, dev_signing_seed,
 };
-pub use state::{DeviceRecord, DeviceRow, DeviceStatus, RecordedRequest};
+pub use state::{DeviceRow, DeviceStatus, RecordedRequest};
 
 use http::Req;
 use state::State;
@@ -108,7 +105,7 @@ impl Server {
         &self.base_url
     }
 
-    /// OIDC issuer: `iss` of tokens, leases and catalogs.
+    /// OIDC issuer: `iss` of tokens and leases.
     pub fn issuer(&self) -> &str {
         &self.shared.issuer
     }
@@ -187,7 +184,7 @@ impl Server {
         }))
     }
 
-    /// Replaces the scenario; tokens, devices and nonces are kept, fault counters reset.
+    /// Replaces the scenario; tokens, devices and challenges are kept, fault counters reset.
     pub fn set_scenario(&self, scenario: Scenario) {
         self.shared.state().set_scenario(scenario);
     }
@@ -212,10 +209,6 @@ impl Server {
         self.shared.state().faults.clear();
     }
 
-    pub fn devices(&self) -> Vec<DeviceRecord> {
-        self.shared.state().devices.clone()
-    }
-
     /// Devices activated through PI's protocol.
     pub fn device_rows(&self) -> Vec<DeviceRow> {
         self.shared.state().pi_devices.clone()
@@ -224,13 +217,11 @@ impl Server {
     /// Revokes a device as an admin would; its next lease refresh reports `device_revoked`.
     pub fn revoke_device(&self, device_id: &str) -> bool {
         let mut state = self.shared.state();
-        let record = state.devices.iter_mut().find(|d| d.device_id == device_id);
-        let record = record.map(|d| d.revoked = true).is_some();
         let row = state
             .pi_devices
             .iter_mut()
             .find(|d| d.device_id == device_id);
-        row.map(|d| d.status = DeviceStatus::Revoked).is_some() || record
+        row.map(|d| d.status = DeviceStatus::Revoked).is_some()
     }
 
     /// True if `refresh_token` belongs to a family revoked by reuse detection or revocation.
@@ -298,9 +289,7 @@ fn serve(shared: &Shared, mut request: tiny_http::Request) {
     let mut headers = resp.headers.clone();
     let now = shared.state().now();
     headers.push(("Date".into(), crypto::http_date(now)));
-    let api = req.path.starts_with(handlers::API_PREFIX);
-    let contract = req.path.starts_with(handlers::CONTRACT_PREFIX);
-    if api || contract {
+    if req.path.starts_with(handlers::API_PREFIX) {
         headers.push(("X-Correlation-Id".into(), cid));
     }
     if !resp.has_header("Cache-Control") {
@@ -316,13 +305,6 @@ fn serve(shared: &Shared, mut request: tiny_http::Request) {
                 "X-Correlation-Id, Idempotent-Replayed".into(),
             ));
         }
-    } else if let Some(origin) = origin.filter(|_| contract) {
-        headers.push(("Access-Control-Allow-Origin".into(), origin.to_owned()));
-        headers.push((
-            "Access-Control-Expose-Headers".into(),
-            "X-Correlation-Id, Retry-After".into(),
-        ));
-        headers.push(("Vary".into(), "Origin".into()));
     }
     for (k, v) in headers {
         if let Ok(h) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
