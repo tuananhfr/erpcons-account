@@ -60,9 +60,12 @@ pub fn is_valid_feature_id(feature: &str) -> bool {
         && Product::from_id(product).is_some()
         && name.split('.').all(|seg| {
             !seg.is_empty()
-                && seg
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+                && seg.bytes().enumerate().all(|(i, b)| {
+                    b.is_ascii_lowercase()
+                        || b.is_ascii_digit()
+                        || b == b'_'
+                        || (i > 0 && b == b'-')
+                })
         })
 }
 

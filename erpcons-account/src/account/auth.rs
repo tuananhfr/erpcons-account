@@ -577,5 +577,6 @@ fn account_locked() -> Error {
         retry_after: None,
         max_devices: None,
         active_devices: None,
+        errors: Box::default(),
     })
 }

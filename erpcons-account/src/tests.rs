@@ -11,8 +11,12 @@ use crate::{
     device::{self, ProofClaims},
     jose,
     lease::{self, Copies, Expect},
+    pi_device::{
+        INTERNAL_CODES, activate_message, compose_features, is_feature_code, is_nonce,
+        refresh_message,
+    },
     storage,
-    time::{TrustedTime, parse_rfc3339},
+    time::{TrustedTime, parse_http_date, parse_rfc3339},
 };
 
 const ISSUER: &str = "https://id.pi.invalid";
@@ -344,14 +348,7 @@ fn feature_ids_and_tiers() {
     for ok in ["vanban.view", "pdf.use", "bangtinh.a_b.c1"] {
         assert!(is_valid_feature_id(ok), "{ok}");
     }
-    for bad in [
-        "vanban",
-        "word.use",
-        "vanban.",
-        "vanban.Use",
-        "vanban..x",
-        "pdf.a-b",
-    ] {
+    for bad in ["vanban", "word.use", "vanban.", "vanban.Use", "vanban..x"] {
         assert!(!is_valid_feature_id(bad), "{bad}");
     }
     assert!(is_pinned_free("trinhchieu.export"));
@@ -460,6 +457,7 @@ fn backoff_and_error_codes() {
         retry_after: Some(Duration::from_secs(7)),
         max_devices: None,
         active_devices: None,
+        errors: Box::default(),
     });
     assert_eq!(b.next_delay(&limited), Duration::from_secs(7));
     assert_eq!(
@@ -616,4 +614,135 @@ fn default_dirs_per_profile() {
         assert_eq!(ubot, ["ubotcad", "pi"]);
         assert_eq!(office, ["erpcons", "pi"]);
     }
+}
+
+const PI_ACTIVATE_SIG: &str =
+    "ARSxETbGfkPoTZOt5x1Hk2kq55REvRB6gWsMasmTzO6QjUEMfDEFR7k-vjv-N30uqQBCx2p8URGCm1Pr94RwBA";
+const PI_REFRESH_SIG: &str =
+    "DUWDs6iLGwGHtNJbD6H6bAlC7f1ot8YSJ1Yju76_OUOOjIprOBWY-5XwuBwRf3GPPrR63TyHGADC-4TdQ9M4AA";
+const PI_JKT: &str = "_oEsEvOrTOasXbaaw1L5BssbEe9D-zPiUu9_9VImOIk";
+const PI_REFRESH_NONCE: &str = "NonceNonceNonceNonce0123456789abcdefghijk";
+
+fn seven_device() -> device::Device {
+    let entry = json!({
+        "installation_id": "9d1e5c2a-7b3f-4e6d-a1c8-5f2e9b7d3a10",
+        "key": jose::b64(&[7u8; 32]),
+    })
+    .to_string();
+    device::Device::from_entry(&entry).unwrap()
+}
+
+#[test]
+fn pi_activate_message_matches_php() {
+    let msg = activate_message(
+        "0b6f1c1e-2a3b-4c5d-8e9f-001122334455",
+        "AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+        "9d1e5c2a-7b3f-4e6d-a1c8-5f2e9b7d3a10",
+        "ubotbuild",
+    );
+    assert_eq!(seven_device().sign(&msg), PI_ACTIVATE_SIG);
+}
+
+#[test]
+fn pi_refresh_message_matches_php() {
+    let msg = refresh_message(
+        "3c2b1a09-8f7e-4d6c-b5a4-938271605f4e",
+        1_792_828_800,
+        PI_REFRESH_NONCE,
+    );
+    assert_eq!(seven_device().sign(&msg), PI_REFRESH_SIG);
+}
+
+#[test]
+fn pi_raw_thumbprint_matches_php() {
+    let public = SigningKey::from_bytes(&[7u8; 32])
+        .verifying_key()
+        .to_bytes();
+    assert_eq!(jose::raw_key_thumbprint(&public), PI_JKT);
+}
+
+#[test]
+fn compose_features_rules() {
+    let codes: Vec<String> = [
+        "cad-view",
+        "cad-use",
+        "offline",
+        "offline-extended",
+        "cad-3d",
+    ]
+    .map(String::from)
+    .into();
+    assert_eq!(
+        compose_features(Product::UbotBuild, &codes).unwrap(),
+        [
+            "ubotbuild.cad-view",
+            "ubotbuild.cad-use",
+            "ubotbuild.cad-3d"
+        ]
+    );
+    assert_eq!(INTERNAL_CODES, ["offline", "offline-extended"]);
+    for bad in ["CAD_USE", "-x", "a", &"a".repeat(65)] {
+        assert_eq!(
+            compose_features(Product::UbotBuild, &[bad.to_string()]),
+            Err(VerifyError::Feature),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
+fn feature_ids_accept_dash() {
+    assert!(is_valid_feature_id("ubotbuild.cad-use"));
+    assert!(!is_valid_feature_id("ubotbuild.-cad"));
+    assert!(is_feature_code("cad-3d"));
+}
+
+#[test]
+fn nonce_rule() {
+    assert!(is_nonce(&"a".repeat(16)));
+    assert!(is_nonce(&"a".repeat(128)));
+    assert!(!is_nonce(&"a".repeat(15)));
+    assert!(!is_nonce(&"a".repeat(129)));
+    assert!(!is_nonce(&format!("{}+", "a".repeat(16))));
+}
+
+#[test]
+fn from_parts_pi_licensing_codes() {
+    assert_eq!(
+        ApiCode::from_parts(403, Some("ORG_CONTEXT_REQUIRED")),
+        ApiCode::OrgContextRequired
+    );
+    assert_eq!(
+        ApiCode::from_parts(403, Some("NO_ENTITLEMENT")),
+        ApiCode::NoEntitlement
+    );
+    assert_eq!(ApiCode::from_parts(403, Some("NO_SEAT")), ApiCode::NoSeat);
+    assert_eq!(
+        ApiCode::from_parts(404, None),
+        ApiCode::Other(String::new())
+    );
+}
+
+#[test]
+fn http_date_parses() {
+    assert_eq!(
+        parse_http_date("Thu, 29 Oct 2026 00:00:00 GMT"),
+        Some(1_793_232_000)
+    );
+    assert_eq!(parse_http_date("Sunday, 06-Nov-94 08:49:37 GMT"), None);
+}
+
+#[test]
+fn problem_errors_are_field_names() {
+    let reply = crate::http::Reply {
+        status: 422,
+        body: br#"{"ok":false,"message":"x","errors":{"timestamp":"..","nonce":".."}}"#.to_vec(),
+        correlation_id: "c".into(),
+        retry_after: None,
+        date: None,
+    };
+    let Error::Api(e) = reply.error() else {
+        panic!("not an API error");
+    };
+    assert_eq!(*e.errors, ["nonce", "timestamp"]);
 }

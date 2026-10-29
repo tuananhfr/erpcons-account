@@ -22,6 +22,9 @@ pub enum ApiCode {
     RateLimited,
     QuotaExceeded,
     DependencyUnavailable,
+    OrgContextRequired,
+    NoEntitlement,
+    NoSeat,
     /// A status outside the contract's set, with the code it carried.
     Other(String),
 }
@@ -36,6 +39,9 @@ impl ApiCode {
             (403, "INSUFFICIENT_SCOPE") => Some(Self::InsufficientScope),
             (403, "MEMBERSHIP_INACTIVE") => Some(Self::MembershipInactive),
             (403, "ACCOUNT_LOCKED") => Some(Self::UserSuspended),
+            (403, "ORG_CONTEXT_REQUIRED") => Some(Self::OrgContextRequired),
+            (403, "NO_ENTITLEMENT") => Some(Self::NoEntitlement),
+            (403, "NO_SEAT") => Some(Self::NoSeat),
             (409, "DEVICE_CAP") => Some(Self::DeviceCapReached),
             (409, "DEVICE_REVOKED") => Some(Self::DeviceRevoked),
             (409, "CHALLENGE_INVALID") => Some(Self::ChallengeInvalid),
@@ -86,6 +92,8 @@ pub struct ApiError {
     pub max_devices: Option<u64>,
     /// Only with `device_cap_reached`.
     pub active_devices: Option<u64>,
+    /// Field names of a 422 `errors` object, sorted; empty otherwise.
+    pub errors: Box<[String]>,
 }
 
 /// Why a lease, catalog or ID token was rejected (lease.md §9).

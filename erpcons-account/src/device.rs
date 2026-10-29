@@ -1,5 +1,5 @@
 //! Device key, `installation_id` and device proofs (lease.md §3).
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use crate::{Error, jose, random};
@@ -59,6 +59,12 @@ impl Device {
 
     pub(crate) fn x(&self) -> String {
         jose::b64(self.key.verifying_key().as_bytes())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    /// Detached Ed25519 signature over `message`, base64url without padding.
+    pub(crate) fn sign(&self, message: &str) -> String {
+        jose::b64(&self.key.sign(message.as_bytes()).to_bytes())
     }
 
     pub(crate) fn thumbprint(&self) -> String {

@@ -157,6 +157,12 @@ pub(crate) fn thumbprint(x: &str) -> String {
     b64(&Sha256::digest(canonical.as_bytes()))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+/// Thumbprint PI computes for a device key: SHA-256 of the raw 32-byte public key.
+pub(crate) fn raw_key_thumbprint(key: &[u8; 32]) -> String {
+    b64(&Sha256::digest(key))
+}
+
 pub(crate) fn sha256_b64(data: &[u8]) -> String {
     b64(&Sha256::digest(data))
 }

@@ -20,6 +20,8 @@ mod lease;
 mod loopback;
 mod me;
 mod oidc;
+#[cfg_attr(not(test), allow(dead_code))]
+mod pi_device;
 mod random;
 mod secrets;
 mod status;

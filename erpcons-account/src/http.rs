@@ -22,6 +22,9 @@ pub(crate) struct Reply {
     pub body: Vec<u8>,
     pub correlation_id: String,
     pub retry_after: Option<Duration>,
+    /// Unix seconds of the `Date` header.
+    #[allow(dead_code)]
+    pub(crate) date: Option<i64>,
 }
 
 pub(crate) enum Body<'a> {
@@ -141,6 +144,7 @@ fn finish(
     let retry_after = header("retry-after")
         .and_then(|s| s.parse::<u64>().ok())
         .map(Duration::from_secs);
+    let date = header("date").and_then(crate::time::parse_http_date);
     let status = resp.status().as_u16();
     let body = resp
         .body_mut()
@@ -153,6 +157,7 @@ fn finish(
         body,
         correlation_id,
         retry_after,
+        date,
     })
 }
 
@@ -189,6 +194,7 @@ struct Problem {
     correlation_id: Option<String>,
     max_devices: Option<u64>,
     active_devices: Option<u64>,
+    errors: Option<std::collections::BTreeMap<String, serde::de::IgnoredAny>>,
 }
 
 fn problem(r: &Reply) -> Option<Problem> {
@@ -223,6 +229,10 @@ impl Reply {
             retry_after: self.retry_after,
             max_devices: p.as_ref().and_then(|p| p.max_devices),
             active_devices: p.as_ref().and_then(|p| p.active_devices),
+            errors: p
+                .and_then(|p| p.errors)
+                .map(|m| m.into_keys().collect())
+                .unwrap_or_default(),
         })
     }
 
