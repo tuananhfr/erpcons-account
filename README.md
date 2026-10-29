@@ -41,6 +41,10 @@ let can_edit = account.allowed("vanban.use"); // cached state only, never blocks
 if account.take_refresh_request() { /* run account.refresh() on a worker */ }
 ```
 
+With `Config::offline_licensing` on, `allowed()` also denies `pro` features while the licence state is
+`DeviceRevoked`, `DeviceCapReached` or `SessionOnly`, even if PI's online entitlements say ALLOW:
+a `pro` feature then needs a lease on this device.
+
 `Account` is `Send + Sync` and keeps no global state. Calls that touch the network block; run
 them off the UI thread. `reload()` re-reads the session shared by the four apps (window focus),
 `select_org(Some(id), open_browser)` / `select_org(None, open_browser)` switches organization

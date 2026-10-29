@@ -96,6 +96,11 @@ impl Account {
 
     /// Challenge, then `POST /devices/activate` for this product, under the shared lock.
     pub(super) fn activate(&self, ops: &mut Ops) -> Result<(), Error> {
+        self.activate_with(ops, false)
+    }
+
+    /// `replace_lease` activates although a usable lease exists: PI no longer knows its device.
+    fn activate_with(&self, ops: &mut Ops, replace_lease: bool) -> Result<(), Error> {
         if !self.cfg.offline_licensing {
             return Ok(());
         }
@@ -121,10 +126,11 @@ impl Account {
                 }
                 let now = self.effective_now();
                 // Another app may have activated this product while we waited for the lock.
-                if view
-                    .leases
-                    .get(&product)
-                    .is_some_and(|l| l.lease.window(now).is_ok())
+                if !replace_lease
+                    && view
+                        .leases
+                        .get(&product)
+                        .is_some_and(|l| l.lease.window(now).is_ok())
                 {
                     return Ok(());
                 }
@@ -201,9 +207,7 @@ impl Account {
                     // PI stores a timestamp only on success, so the rejected one is undone; the
                     // reply's `Date` has corrected the offset for one more try.
                     Error::Api(e)
-                        if e.status == 422
-                            && e.errors.iter().any(|f| f == "timestamp")
-                            && std::mem::take(&mut retimed) =>
+                        if e.status == 422 && e.errors.iter().any(|f| f == "timestamp") =>
                     {
                         let product = product.id();
                         self.update_session(ops, |s| match before_send {
@@ -214,12 +218,14 @@ impl Account {
                                 s.last_refresh_ts.remove(product);
                             }
                         })?;
+                        if !std::mem::take(&mut retimed) {
+                            return Err(error);
+                        }
                     }
-                    // PI answers a device it does not know with a bare 404.
-                    Error::Api(e) if e.status == 404 => {
+                    // The old lease and device id stay until the new activation replaces them.
+                    Error::Api(e) if e.code == ApiCode::DeviceUnknown && e.status == 404 => {
                         log::warn!("PI does not know this device; activating again");
-                        self.forget_device(ops)?;
-                        return self.activate(ops);
+                        return self.activate_with(ops, true);
                     }
                     _ => {
                         self.on_device_error(ops, &error)?;
@@ -269,7 +275,9 @@ impl Account {
             .unwrap_or_else(|| self.view().session.clone());
         let server_now = self.cfg.clock.unix_now() + self.server_offset.load(Ordering::SeqCst);
         let previous = s.last_refresh_ts.get(product).copied();
-        let above_last = previous.map_or(i64::MIN, |t| t.saturating_add(1));
+        // PI never stores a timestamp more than 300 s ahead of its clock, so a higher one here
+        // belongs to a send that was never accepted.
+        let above_last = previous.map_or(i64::MIN, |t| t.saturating_add(1).min(server_now + 300));
         let timestamp = server_now.max(above_last);
         s.last_refresh_ts.insert(product.to_owned(), timestamp);
         self.write_session(ops, &mut s, Floor::Max)?;
@@ -367,14 +375,5 @@ impl Account {
             }
             _ => Ok(()),
         }
-    }
-
-    /// PI no longer knows this product's device: its id and lease go.
-    fn forget_device(&self, ops: &mut Ops) -> Result<(), Error> {
-        let product = self.cfg.product;
-        self.remove_lease(product)?;
-        self.update_session(ops, |s| {
-            s.device_ids.remove(product.id());
-        })
     }
 }

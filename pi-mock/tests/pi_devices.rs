@@ -621,7 +621,17 @@ fn entitlements_row_shape() {
     assert_eq!(items.len(), 1);
     let row = &items[0];
     assert_eq!(row["decision"], "ALLOW");
-    assert_eq!(row["seat"], true);
+    // An unlimited plan assigns the seat at activation, not before.
+    assert_eq!(row["seat"], false);
+    assert_eq!(fx.activate(INSTALLATION).status, 201);
+    let after = fx.call(
+        "GET",
+        "/api/v1/id/me/entitlements?product_id=ubotbuild",
+        Some(&token),
+        None,
+        &[],
+    );
+    assert_eq!(after.json["items"][0]["seat"], true);
     assert_eq!(row["tenant"]["product"], "ubotbuild");
     let codes: Vec<&str> = row["features"]
         .as_array()

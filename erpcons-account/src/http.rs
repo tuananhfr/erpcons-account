@@ -188,6 +188,7 @@ fn retryable(r: &Reply) -> bool {
 /// PI's `{ok:false, message, code?, correlationId?}` or an RFC 9457 problem: both carry `code`.
 #[derive(Deserialize)]
 struct Problem {
+    ok: Option<bool>,
     code: Option<String>,
     #[serde(alias = "correlationId")]
     correlation_id: Option<String>,
@@ -213,7 +214,14 @@ impl Reply {
     /// Typed error for a non-2xx reply.
     pub(crate) fn error(&self) -> Error {
         let p = problem(self);
-        let code = ApiCode::from_parts(self.status, p.as_ref().and_then(|p| p.code.as_deref()));
+        let mut code = ApiCode::from_parts(self.status, p.as_ref().and_then(|p| p.code.as_deref()));
+        // A 404 from a proxy or a missing route is not PI telling us the resource is gone.
+        if self.status == 404
+            && p.as_ref()
+                .is_some_and(|p| p.ok == Some(false) && p.code.is_none())
+        {
+            code = ApiCode::DeviceUnknown;
+        }
         let correlation_id = p
             .as_ref()
             .and_then(|p| p.correlation_id.clone())

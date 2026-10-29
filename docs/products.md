@@ -98,11 +98,16 @@ allowed(f):
     if f not in builtin_catalog: return false        # programming error, logged
     if tier(f) == free: return true                  # includes pinned free
     if not signed_in: return false                   # guest
+    if licensing and state in {DeviceRevoked, DeviceCapReached, SessionOnly}: return false
     if desktop and lease_usable() and f in lease.features: return true      # lease.md §8
     if entitlements_fresh() and f in {e.feature for e in entitlements}: return true
     return false
 ```
 
+- `licensing` is `Config::offline_licensing` (ADR 0012, amendment). PI's entitlements are per user
+  and organization, so they cannot show a revoked, capped or credential-less device; in those three
+  states `pro` is denied and no refresh is requested, since a refresh does not recover them
+  (sign-in, `retry_activation` or a credential store does).
 - `signed_in`: a refresh token is stored (desktop: the shared credential entry, or session memory
   without a credential store; web: `localStorage`), whether or not the network is reachable.
 - Online path: `entitlements` is the last `GET /v1/me/entitlements` result for this product, `sub`
@@ -119,8 +124,8 @@ allowed(f):
 | Desktop, signed in, lease usable | allowed | allowed | allowed while entitlements are fresh |
 | Desktop, signed in, lease expired, offline | allowed | denied | denied |
 | Desktop, signed in, lease expired, online | allowed | allowed while entitlements are fresh (refresh renews the lease) | allowed while fresh |
-| Desktop, signed in, lease revoked | allowed | denied unless fresh entitlements still list it | same |
-| Desktop, signed in, no credential store | allowed | online path only | allowed while fresh |
+| Desktop, signed in, lease revoked | allowed | denied unless fresh entitlements still list it (denied with licensing on and the device revoked or capped) | same |
+| Desktop, signed in, no credential store | allowed | online path only (denied with licensing on) | allowed while fresh (denied with licensing on) |
 | Web, signed in, online | allowed | n/a (no lease on web) | allowed while fresh |
 | Web, signed in, offline for more than 10 min | allowed | n/a | denied |
 

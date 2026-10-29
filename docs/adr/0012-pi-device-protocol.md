@@ -65,3 +65,12 @@ The 15 PI claims replace the contract's: `lease_id` is `jti`, `device_id` is `de
   pi-mock `Scenario` uses `Tenant`. Crate version 0.4.0.
 - Office keeps `offline_licensing` off; PI has no Office product, so nothing there changes.
 - Revocation is observed only at refresh (at least every 12 h online); there is no push.
+
+## Amendment: `allowed()` and device state
+
+With `offline_licensing` on, `allowed()` no longer falls back to online entitlements while the
+licence state is `DeviceRevoked`, `DeviceCapReached` or `SessionOnly`. PI's entitlements are per
+user and organization, so they stayed ALLOW for a revoked, capped or credential-less device and
+granted `pro` on any number of machines. No refresh is requested in those states: a refresh does
+not recover them (sign-in for a retired device, `retry_activation` for the cap). `NotEntitled` keeps
+the online path, which is how it lifts. Office (`offline_licensing` off) is unchanged.

@@ -66,6 +66,15 @@ pub(crate) fn handle(shared: &Shared, req: &Req, cid: &str) -> (Resp, Option<Dur
             }
             return (resp, None);
         }
+        Some(FaultAction::Invalid { field }) => {
+            return (
+                Resp::pi_invalid(serde_json::json!({ field: "invalid" })),
+                None,
+            );
+        }
+        Some(FaultAction::Raw { status }) => {
+            return (Resp::text(status, "Not Found"), None);
+        }
         Some(FaultAction::OAuthError { status, error }) => {
             return (Resp::oauth_error(status, &error), None);
         }

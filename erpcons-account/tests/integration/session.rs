@@ -134,7 +134,9 @@ fn credential_store_unavailable_gives_session_only_sign_in() {
     let s = signed_in(account.status());
     assert!(s.session_only);
     assert_eq!(s.licence, LicenceState::SessionOnly);
-    assert!(account.allowed(PRO), "online path");
+    // No lease can exist here, so licensing denies `pro` whatever PI's entitlements say.
+    assert!(!account.allowed(PRO));
+    assert!(!account.take_refresh_request());
     assert_eq!(env.count("GET", CHALLENGE), 0);
     assert_eq!(env.count("POST", ACTIVATE), 0);
     assert!(!env.file("session.json").exists());

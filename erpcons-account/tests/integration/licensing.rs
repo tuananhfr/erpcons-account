@@ -4,7 +4,7 @@ use erpcons_account::{
     Account, ApiCode, BuiltinFeature, Error, LicenceState, Product, Status, Tier, VerifyError,
     WarningStage,
 };
-use pi_mock::{Fault, LeaseTamper, ORG_A, ORG_B, Scenario, Tenant};
+use pi_mock::{DEFAULT_USER, Fault, LeaseTamper, ORG_A, ORG_B, Scenario, Tenant};
 use serde_json::Value;
 
 use crate::common::{
@@ -219,12 +219,32 @@ fn no_plan_is_not_entitled_and_keeps_free() {
     assert!(account.allowed(EXPORT));
     assert!(!account.allowed(PRO));
 
+    // An unlimited plan has no seat for this account until activation grants one, so
+    // entitlements do not lift the block; only the user retry does.
     env.server
         .update_scenario(|s| s.tenants = vec![free_tenant()]);
     account.refresh().unwrap();
-    assert_eq!(env.count("POST", ACTIVATE), 2);
+    assert_eq!(env.count("POST", ACTIVATE), 1);
+    assert_eq!(licence(&account), LicenceState::NotEntitled);
+    account.retry_activation().unwrap();
     assert!(matches!(licence(&account), LicenceState::Active { .. }));
     assert!(account.allowed(PRO));
+}
+
+#[test]
+fn seated_plan_lifts_not_entitled_at_refresh() {
+    let env = Env::licensing(Scenario {
+        tenants: Vec::new(),
+        ..licensed()
+    });
+    let account = env.cad();
+    sign_in(&account);
+    assert_eq!(licence(&account), LicenceState::NotEntitled);
+    env.server
+        .update_scenario(|s| s.tenants = vec![free_tenant().seats(&[DEFAULT_USER])]);
+    account.refresh().unwrap();
+    assert_eq!(env.count("POST", ACTIVATE), 2);
+    assert!(matches!(licence(&account), LicenceState::Active { .. }));
 }
 
 #[test]
@@ -279,6 +299,47 @@ fn unknown_device_reactivates_once() {
         .add_fault(Fault::problem("POST", REFRESH, 404, "").times(1));
     account.refresh().unwrap();
     assert_eq!(env.count("POST", ACTIVATE), 2);
+    assert!(matches!(licence(&account), LicenceState::Active { .. }));
+}
+
+#[test]
+fn bare_404_at_refresh_keeps_the_lease() {
+    let env = Env::licensing(licensed());
+    let account = env.cad();
+    sign_in(&account);
+    let kept = lease_id(&account);
+    env.advance(13 * 3600);
+    env.server
+        .add_fault(Fault::raw("POST", REFRESH, 404).times(1));
+    assert!(account.refresh().is_err());
+    assert_eq!(env.count("POST", ACTIVATE), 1);
+    assert_eq!(lease_id(&account), kept);
+    assert!(env.file("lease-ubotbuild.json").exists());
+}
+
+#[test]
+fn rejected_timestamps_are_all_undone() {
+    let env = Env::licensing(licensed());
+    let account = env.cad();
+    sign_in(&account);
+    env.advance(13 * 3600);
+    env.server
+        .add_fault(Fault::invalid("POST", REFRESH, "timestamp").times(2));
+    let err = account.refresh().unwrap_err();
+    assert!(matches!(&err, Error::Api(e) if e.status == 422), "{err:?}");
+    // PI saw neither request, so nothing may stay persisted ahead of its clock.
+    account.refresh().unwrap();
+    let platform_now = env.server.scenario().now.unwrap();
+    let sent: Vec<i64> = env
+        .requests_to(REFRESH)
+        .iter()
+        .map(|r| {
+            serde_json::from_str::<Value>(&r.body).unwrap()["timestamp"]
+                .as_i64()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(sent, [platform_now; 3]);
     assert!(matches!(licence(&account), LicenceState::Active { .. }));
 }
 
@@ -354,6 +415,28 @@ fn device_cap_blocks_activation_until_user_retry() {
         .update_scenario(|s| s.tenants = vec![free_tenant().device_cap(1)]);
     account.retry_activation().unwrap();
     assert!(matches!(licence(&account), LicenceState::Active { .. }));
+}
+
+#[test]
+fn device_cap_denies_pro_even_with_fresh_entitlements() {
+    let env = Env::licensing(Scenario {
+        tenants: vec![free_tenant().device_cap(0)],
+        ..licensed()
+    });
+    let account = env.cad();
+    sign_in(&account);
+    assert_eq!(licence(&account), LicenceState::DeviceCapReached);
+    assert!(!account.allowed(PRO));
+    assert!(account.allowed(VIEW));
+    // A refresh does not activate while the cap flag is set, so asking for one would only loop.
+    assert!(!account.take_refresh_request());
+    env.advance(11 * 60);
+    account.refresh().unwrap();
+    assert!(!account.allowed(PRO));
+    env.server
+        .update_scenario(|s| s.tenants = vec![free_tenant().device_cap(1)]);
+    account.retry_activation().unwrap();
+    assert!(account.allowed(PRO));
 }
 
 #[test]

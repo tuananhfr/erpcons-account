@@ -68,9 +68,14 @@ fn ubotcad_revoked_device_keeps_view() {
         signed_in(account.status()).licences[&Product::UbotBuild],
         LicenceState::DeviceRevoked
     );
-    // Online entitlements (fresh for 600 s) still grant `use`; only the lease is gone.
-    assert!(account.allowed(USE));
+    // PI's entitlements still say ALLOW, but they are per user, not per device.
+    assert!(!account.allowed(USE));
+    assert!(!account.take_refresh_request());
     env.advance(11 * 60);
+    assert!(!account.allowed(USE));
+    assert!(!account.take_refresh_request());
+    // The refresh the app runs on a request must not bring `pro` back either.
+    account.refresh().unwrap();
     assert!(!account.allowed(USE));
     assert!(account.allowed(VIEW));
     assert!(account.allowed(EXPORT));

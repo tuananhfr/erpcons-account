@@ -10,6 +10,8 @@ pub enum ApiCode {
     MembershipInactive,
     UserSuspended,
     DeviceRevoked,
+    /// The Office contract's 403, and PI's 404 envelope (`ok:false`, no code); at refresh, a
+    /// device PI does not know.
     DeviceUnknown,
     Forbidden,
     DeviceCapReached,

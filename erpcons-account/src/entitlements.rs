@@ -49,7 +49,8 @@ struct Offline {
 }
 
 /// Features of the rows that grant `product` in `org` (`ALLOW` with a seat); a row of another
-/// product or organization discards the whole response.
+/// product or organization discards the whole response; a row with an invalid feature code is
+/// skipped.
 pub(crate) fn parse(body: &[u8], product: Product, org: &str) -> Result<Vec<Entitlement>, Error> {
     let list: List = serde_json::from_slice(body).map_err(|e| Error::BadResponse(e.to_string()))?;
     let foreign = list
@@ -70,8 +71,11 @@ pub(crate) fn parse(body: &[u8], product: Product, org: &str) -> Result<Vec<Enti
     {
         let codes: Vec<String> = row.features.iter().map(|f| f.code.clone()).collect();
         let offline_allowed = row.offline.as_ref().is_some_and(|o| o.allowed);
-        let features = compose_features(product, &codes)
-            .map_err(|_| Error::BadResponse("entitlement feature code".into()))?;
+        // One malformed row must not stop the lease sync that follows the fetch.
+        let Ok(features) = compose_features(product, &codes) else {
+            log::warn!("entitlement row with an invalid feature code skipped");
+            continue;
+        };
         granted.extend(features.into_iter().map(|feature| Entitlement {
             feature,
             offline_allowed,

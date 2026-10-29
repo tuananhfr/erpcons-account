@@ -445,10 +445,18 @@ fn pi_entitlement_rows() {
             Err(Error::TenantIsolation)
         );
     }
-    assert!(matches!(
-        parse_rows(vec![row(PI_ORG, "ubotbuild", "ALLOW", true, &["CAD_USE"])]),
-        Err(Error::BadResponse(_))
-    ));
+    // A row with a bad feature code is skipped; the others still count.
+    let kept = parse_rows(vec![
+        row(PI_ORG, "ubotbuild", "ALLOW", true, &["CAD_USE"]),
+        allow.clone(),
+    ])
+    .unwrap();
+    assert_eq!(kept.len(), parse_rows(vec![allow.clone()]).unwrap().len());
+    assert!(
+        parse_rows(vec![row(PI_ORG, "ubotbuild", "ALLOW", true, &["CAD_USE"])])
+            .unwrap()
+            .is_empty()
+    );
 }
 
 fn signed(header: &serde_json::Value, payload: &str, key: &SigningKey) -> String {
@@ -723,6 +731,18 @@ fn ubotcad_profile_values() {
     assert_eq!(cfg.client_id, "ubotcad-desktop");
     assert_eq!(cfg.user_agent, "UbotCAD/0.9.0");
     assert_eq!(cfg.profile, crate::ClientProfile::UBOTCAD);
+}
+
+#[test]
+fn config_rejects_product_or_client_outside_the_profile() {
+    let cfg = crate::Config::new(ISSUER, Product::UbotBuild, "0.9.0");
+    assert!(cfg.validate().is_ok());
+    let mut other_product = cfg.clone();
+    other_product.product = Product::VanBan;
+    assert!(matches!(other_product.validate(), Err(Error::Config(_))));
+    let mut other_client = cfg;
+    other_client.client_id = DESKTOP_CLIENT_ID.into();
+    assert!(matches!(other_client.validate(), Err(Error::Config(_))));
 }
 
 #[test]

@@ -270,6 +270,12 @@ impl Config {
         if !valid_version(&self.client_version) {
             return bad("client_version must be major.minor.patch");
         }
+        if !self.profile.products.contains(&self.product) {
+            return bad("product is not served by the client profile");
+        }
+        if self.client_id != self.profile.client_id {
+            return bad("client_id differs from the client profile");
+        }
         if self
             .builtin_features
             .iter()

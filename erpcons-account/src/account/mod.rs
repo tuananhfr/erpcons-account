@@ -166,6 +166,11 @@ impl Account {
     }
 
     /// `allowed(feature)` of products.md §4; answers from cached state only.
+    ///
+    /// With [`Config::offline_licensing`] on, a `pro` feature needs this device: in
+    /// `DeviceRevoked`, `DeviceCapReached` and `SessionOnly` the answer is false even while PI's
+    /// per-user entitlements still say ALLOW (they do not know about device limits or revocation).
+    /// None of those states is recovered by a refresh, so no refresh is requested for them.
     pub fn allowed(&self, feature: &str) -> bool {
         let view = self.view();
         let Some(tier) = catalog::tier(&self.cfg.builtin_features, view.catalog.as_ref(), feature)
@@ -180,6 +185,16 @@ impl Account {
             return false;
         }
         let now = self.effective_now();
+        if self.cfg.offline_licensing
+            && matches!(
+                self.licence(&view, self.cfg.product, now),
+                LicenceState::DeviceRevoked
+                    | LicenceState::DeviceCapReached
+                    | LicenceState::SessionOnly
+            )
+        {
+            return false;
+        }
         if let Some(slot) = view.leases.get(&self.cfg.product)
             && slot.lease.window(now).is_ok()
             && slot.lease.features.iter().any(|f| f == feature)

@@ -62,15 +62,23 @@ fn tenant_of(st: &State, org: &str, product: &str) -> Option<Tenant> {
         .cloned()
 }
 
-fn has_seat(tenant: &Tenant, account: &str) -> bool {
-    tenant
-        .seats
-        .as_ref()
-        .is_none_or(|seats| seats.iter().any(|s| s == account))
+/// `Seats::hasSeat`: false on an unlimited plan until activation grants the seat.
+fn has_seat(st: &State, tenant: &Tenant, account: &str) -> bool {
+    tenant.seats.iter().any(|s| s == account)
+        || st
+            .granted_seats
+            .contains(&(tenant.tenant_id.clone(), account.to_owned()))
 }
 
 /// `NO_ENTITLEMENT` or `NO_SEAT` for an organization that cannot hold a lease, else its tenant.
-fn entitled(st: &State, org: &str, product: &str, account: &str) -> Result<Tenant, Resp> {
+/// Only activation (`grant_seat`) assigns the seat of an unlimited plan.
+fn entitled(
+    st: &mut State,
+    org: &str,
+    product: &str,
+    account: &str,
+    grant_seat: bool,
+) -> Result<Tenant, Resp> {
     let tenant = tenant_of(st, org, product).ok_or_else(|| {
         coded(
             403,
@@ -78,7 +86,12 @@ fn entitled(st: &State, org: &str, product: &str, account: &str) -> Result<Tenan
             "NO_ENTITLEMENT",
         )
     })?;
-    if !has_seat(&tenant, account) {
+    if !has_seat(st, &tenant, account) {
+        if grant_seat && tenant.unlimited_seats {
+            st.granted_seats
+                .insert((tenant.tenant_id.clone(), account.to_owned()));
+            return Ok(tenant);
+        }
         return Err(coded(
             403,
             "Bạn chưa được cấp chỗ ngồi cho sản phẩm này.",
@@ -261,7 +274,7 @@ fn activate_once(st: &mut State, ctx: &Ctx, req: &Req, auth: &Auth) -> Resp {
             "ORG_CONTEXT_REQUIRED",
         );
     };
-    let tenant = match entitled(st, &org, product, &auth.user_id) {
+    let tenant = match entitled(st, &org, product, &auth.user_id, true) {
         Ok(t) => t,
         Err(resp) => return resp,
     };
@@ -384,7 +397,7 @@ pub(super) fn refresh(st: &mut State, ctx: &Ctx, req: &Req) -> Resp {
             "MEMBERSHIP_INACTIVE",
         );
     }
-    let tenant = match entitled(st, &row.org, &row.product, &row.user_id) {
+    let tenant = match entitled(st, &row.org, &row.product, &row.user_id, false) {
         Ok(t) => t,
         Err(resp) => return resp,
     };
@@ -574,7 +587,7 @@ pub(super) fn entitlements(st: &State, req: &Req) -> Resp {
                     "endsAt": tenant.valid_to.map(crypto::rfc3339),
                 },
                 "evaluatedAt": crypto::rfc3339(now),
-                "seat": has_seat(&tenant, &auth.user_id),
+                "seat": has_seat(st, &tenant, &auth.user_id),
                 "offline": {
                     "allowed": tenant.features.iter().any(|f| f == "offline"),
                     "days": tenant.offline_days,

@@ -191,8 +191,11 @@ pub struct Tenant {
     /// Lease lifetime in days when `features` has `offline`.
     pub offline_days: u32,
     pub device_cap: usize,
-    /// Accounts holding a seat; `None` is an unlimited plan that grants seats on demand.
-    pub seats: Option<Vec<String>>,
+    /// Accounts holding a seat. An unlimited plan (`unlimited_seats`) grants one at activation.
+    pub seats: Vec<String>,
+    /// Plan without a seat cap: `seats` fills as accounts activate (PI `Seats::hasSeat` is false
+    /// until then).
+    pub unlimited_seats: bool,
     /// End of the subscription (Unix seconds); leases never outlive it.
     pub valid_to: Option<i64>,
     /// `<planCode>@<planVersion>`, the lease `policy_version`.
@@ -208,7 +211,8 @@ impl Tenant {
             features: features.iter().map(|f| f.to_string()).collect(),
             offline_days: 7,
             device_cap: 2,
-            seats: None,
+            seats: Vec::new(),
+            unlimited_seats: true,
             valid_to: None,
             plan: "ubb-mien-phi@1".into(),
         }
@@ -225,7 +229,8 @@ impl Tenant {
     }
 
     pub fn seats(mut self, accounts: &[&str]) -> Self {
-        self.seats = Some(accounts.iter().map(|a| a.to_string()).collect());
+        self.seats = accounts.iter().map(|a| a.to_string()).collect();
+        self.unlimited_seats = false;
         self
     }
 
@@ -288,6 +293,10 @@ pub enum FaultAction {
         code: String,
         retry_after: Option<u64>,
     },
+    /// PI's 422 envelope with one rejected request field and no `code`.
+    Invalid { field: String },
+    /// A plain-text body that is not PI's JSON envelope (proxy or maintenance page).
+    Raw { status: u16 },
     /// OAuth error body from the token endpoint.
     OAuthError { status: u16, error: String },
     /// Handle the request normally, then hold the response (client timeouts).
@@ -307,6 +316,26 @@ impl Fault {
                 code: code.into(),
                 retry_after: None,
             },
+        }
+    }
+
+    pub fn invalid(method: &str, path: &str, field: &str) -> Self {
+        Self {
+            method: method.into(),
+            path: path.into(),
+            times: None,
+            action: FaultAction::Invalid {
+                field: field.into(),
+            },
+        }
+    }
+
+    pub fn raw(method: &str, path: &str, status: u16) -> Self {
+        Self {
+            method: method.into(),
+            path: path.into(),
+            times: None,
+            action: FaultAction::Raw { status },
         }
     }
 

@@ -71,14 +71,17 @@ pub enum LicenceState {
         lease_id: String,
         expires_at: i64,
     },
-    /// Device revoked; no activation until the next sign-in.
+    /// Device revoked; no activation until the next sign-in. Only a device the user retired
+    /// themselves recovers then: PI has no un-revoke, so a staff- or organization-revoked
+    /// installation answers 409 again at every sign-in.
     DeviceRevoked,
     /// Device cap reached; activation waits for a user retry.
     DeviceCapReached,
     /// The organization has no plan or seat for this product. No activation until sign-in, an
     /// organization switch, a user retry, or PI's entitlements granting the product again.
     NotEntitled,
-    /// No OS credential store: `pro` features use the online path only.
+    /// No OS credential store: no lease can be kept, so with licensing on `pro` features are
+    /// denied; without it they use the online path.
     SessionOnly,
 }
 

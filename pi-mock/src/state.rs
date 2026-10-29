@@ -107,6 +107,8 @@ pub(crate) struct State {
     pub refresh: HashMap<String, RefreshRecord>,
     pub revoked_families: HashSet<u64>,
     pub pi_devices: Vec<DeviceRow>,
+    /// (tenant id, account) seats granted at activation on unlimited plans.
+    pub granted_seats: HashSet<(String, String)>,
     pub challenges: HashMap<String, Challenge>,
     pub idempotency: HashMap<(String, String, String), Idempotency>,
     pub requests: Vec<RecordedRequest>,
@@ -123,6 +125,7 @@ impl State {
             refresh: HashMap::new(),
             revoked_families: HashSet::new(),
             pi_devices: Vec::new(),
+            granted_seats: HashSet::new(),
             challenges: HashMap::new(),
             idempotency: HashMap::new(),
             requests: Vec::new(),
