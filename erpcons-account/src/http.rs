@@ -194,7 +194,8 @@ struct Problem {
     correlation_id: Option<String>,
     max_devices: Option<u64>,
     active_devices: Option<u64>,
-    errors: Option<std::collections::BTreeMap<String, serde::de::IgnoredAny>>,
+    // PHP emits `[]` for an empty array, so only an object carries field names.
+    errors: Option<serde_json::Value>,
 }
 
 fn problem(r: &Reply) -> Option<Problem> {
@@ -229,10 +230,14 @@ impl Reply {
             retry_after: self.retry_after,
             max_devices: p.as_ref().and_then(|p| p.max_devices),
             active_devices: p.as_ref().and_then(|p| p.active_devices),
-            errors: p
-                .and_then(|p| p.errors)
-                .map(|m| m.into_keys().collect())
-                .unwrap_or_default(),
+            errors: match p.and_then(|p| p.errors) {
+                Some(serde_json::Value::Object(m)) => {
+                    let mut names: Vec<String> = m.keys().cloned().collect();
+                    names.sort();
+                    names.into()
+                }
+                _ => Box::default(),
+            },
         })
     }
 

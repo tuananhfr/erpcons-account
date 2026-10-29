@@ -746,3 +746,19 @@ fn problem_errors_are_field_names() {
     };
     assert_eq!(*e.errors, ["nonce", "timestamp"]);
 }
+
+#[test]
+fn problem_with_non_object_errors_keeps_code() {
+    let reply = crate::http::Reply {
+        status: 409,
+        body: br#"{"ok":false,"message":"x","code":"DEVICE_CAP","errors":[]}"#.to_vec(),
+        correlation_id: "c".into(),
+        retry_after: None,
+        date: None,
+    };
+    let Error::Api(e) = reply.error() else {
+        panic!("not an API error");
+    };
+    assert_eq!(e.code, ApiCode::DeviceCapReached);
+    assert!(e.errors.is_empty());
+}
