@@ -77,7 +77,13 @@ fn ubotcad_revoked_device_keeps_view() {
         account.refresh(),
         Err(Error::Revoked(RevocationReason::DeviceRevoked))
     );
-    // Online entitlements still grant `use` while fresh; without a lease nothing outlives them.
+    assert!(!env.file("lease-ubotbuild.json").exists());
+    assert_eq!(
+        signed_in(account.status()).licences[&Product::UbotBuild],
+        LicenceState::DeviceRevoked
+    );
+    // Online entitlements (fresh for 600 s) still grant `use`; only the lease is gone.
+    assert!(account.allowed(USE));
     env.advance(11 * 60);
     assert!(!account.allowed(USE));
     assert!(account.allowed("ubotbuild.cad.view"));
@@ -103,6 +109,13 @@ fn office_lease_rejected_by_ubotcad() {
     let account = ubotcad(&env);
     sign_in(&account);
     assert_eq!(account.refresh(), Err(Error::Lease(VerifyError::Audience)));
+    assert!(!env.file("lease-ubotbuild.json").exists());
+    assert_eq!(
+        signed_in(account.status()).licences[&Product::UbotBuild],
+        LicenceState::NotActivated
+    );
+    // Online entitlements (fresh for 600 s) still grant `use`; the rejected lease adds nothing.
+    assert!(account.allowed(USE));
     env.advance(11 * 60);
     assert!(!account.allowed(USE));
 }
