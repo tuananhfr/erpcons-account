@@ -8,8 +8,8 @@ use pi_mock::{Fault, LeaseTamper, ORG_A, ORG_B, Scenario, Tenant};
 use serde_json::Value;
 
 use crate::common::{
-    ACTIVATE, CHALLENGE, DAY, EXPORT, Env, PRO, REFRESH, VIEW, browser, free_tenant, licensed,
-    pro_scenario, sign_in, signed_in,
+    ACTIVATE, CHALLENGE, DAY, ENTITLEMENTS, EXPORT, Env, PRO, REFRESH, VIEW, browser, free_tenant,
+    licensed, pro_scenario, sign_in, signed_in,
 };
 
 fn licence(account: &Account) -> LicenceState {
@@ -121,6 +121,29 @@ fn refresh_survives_client_clock_skew() {
     let body = bodies(&env, REFRESH).pop().unwrap();
     assert_eq!(body["timestamp"], platform_now);
     assert!(matches!(licence(&account), LicenceState::Active { .. }));
+}
+
+#[test]
+fn refresh_recovers_from_a_timestamp_ahead_of_pi() {
+    let env = Env::licensing(licensed());
+    let account = env.cad();
+    sign_in(&account);
+    env.advance(13 * 3600);
+    env.server
+        .add_fault(Fault::skew_date("GET", ENTITLEMENTS, 3600).times(1));
+    account.refresh().unwrap();
+    let platform_now = env.server.scenario().now.unwrap();
+    let sent: Vec<i64> = bodies(&env, REFRESH)
+        .iter()
+        .map(|b| b["timestamp"].as_i64().unwrap())
+        .collect();
+    assert_eq!(sent, [platform_now + 3600, platform_now]);
+    assert!(matches!(licence(&account), LicenceState::Active { .. }));
+
+    env.advance(13 * 3600);
+    account.refresh().unwrap();
+    let last = bodies(&env, REFRESH).pop().unwrap();
+    assert_eq!(last["timestamp"], platform_now + 13 * 3600);
 }
 
 #[test]

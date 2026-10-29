@@ -192,16 +192,29 @@ impl Account {
             };
             let mut retimed = true;
             loop {
-                let error = match self.refresh_once(ops, &device_id) {
+                let mut before_send = None;
+                let error = match self.refresh_once(ops, &device_id, &mut before_send) {
                     Ok(()) => return Ok(()),
                     Err(e) => e,
                 };
                 match &error {
-                    // The reply's `Date` has corrected the clock offset; a new timestamp once.
+                    // PI stores a timestamp only on success, so the rejected one is undone; the
+                    // reply's `Date` has corrected the offset for one more try.
                     Error::Api(e)
                         if e.status == 422
                             && e.errors.iter().any(|f| f == "timestamp")
-                            && std::mem::take(&mut retimed) => {}
+                            && std::mem::take(&mut retimed) =>
+                    {
+                        let product = product.id();
+                        self.update_session(ops, |s| match before_send {
+                            Some(t) => {
+                                s.last_refresh_ts.insert(product.to_owned(), t);
+                            }
+                            None => {
+                                s.last_refresh_ts.remove(product);
+                            }
+                        })?;
+                    }
                     // PI answers a device it does not know with a bare 404.
                     Error::Api(e) if e.status == 404 => {
                         log::warn!("PI does not know this device; activating again");
@@ -217,7 +230,13 @@ impl Account {
         })
     }
 
-    fn refresh_once(&self, ops: &mut Ops, device_id: &str) -> Result<(), Error> {
+    /// `before_send` gets this product's `last_refresh_ts` as it was before the last send.
+    fn refresh_once(
+        &self,
+        ops: &mut Ops,
+        device_id: &str,
+        before_send: &mut Option<i64>,
+    ) -> Result<(), Error> {
         let device = self.ensure_device(ops)?;
         let url = self.cfg.pi_url("/licenses/refresh");
         let mut nonce = String::new();
@@ -225,8 +244,9 @@ impl Account {
             self.http.retrying(Retry::Idempotent, || {
                 // Each send gets its own timestamp and nonce: PI may have stored the timestamp
                 // of a send whose reply never arrived.
-                let (body, sent) = self.refresh_body(ops, &device, device_id)?;
+                let (body, sent, previous) = self.refresh_body(ops, &device, device_id)?;
                 nonce = sent;
+                *before_send = previous;
                 let key = random::uuid_v4()?;
                 self.http.post(&url, Some(token), &Body::Json(&body), &key)
             })
@@ -235,23 +255,21 @@ impl Account {
         self.accept_lease(ops, &device, &response, &nonce)
     }
 
-    /// Signed refresh body and its nonce. The timestamp follows PI's clock, stays above the last
-    /// one sent, and is in `session.json` before the body leaves.
+    /// Signed refresh body, its nonce and the previous `last_refresh_ts`. The timestamp follows
+    /// PI's clock, stays above the last one sent, and is in `session.json` before the body leaves.
     fn refresh_body(
         &self,
         ops: &mut Ops,
         device: &Device,
         device_id: &str,
-    ) -> Result<(Vec<u8>, String), Error> {
+    ) -> Result<(Vec<u8>, String, Option<i64>), Error> {
         let product = self.cfg.product.id();
         let mut s = self
             .read_session_disk(ops)
             .unwrap_or_else(|| self.view().session.clone());
         let server_now = self.cfg.clock.unix_now() + self.server_offset.load(Ordering::SeqCst);
-        let above_last = s
-            .last_refresh_ts
-            .get(product)
-            .map_or(i64::MIN, |t| t.saturating_add(1));
+        let previous = s.last_refresh_ts.get(product).copied();
+        let above_last = previous.map_or(i64::MIN, |t| t.saturating_add(1));
         let timestamp = server_now.max(above_last);
         s.last_refresh_ts.insert(product.to_owned(), timestamp);
         self.write_session(ops, &mut s, Floor::Max)?;
@@ -263,7 +281,7 @@ impl Account {
             "nonce": nonce,
         });
         let bytes = serde_json::to_vec(&body).map_err(|e| Error::Internal(e.to_string()))?;
-        Ok((bytes, nonce))
+        Ok((bytes, nonce, previous))
     }
 
     /// lease.md §9 on receipt; any failure leaves the previous lease in place.

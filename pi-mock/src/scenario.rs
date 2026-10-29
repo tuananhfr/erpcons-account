@@ -292,6 +292,8 @@ pub enum FaultAction {
     OAuthError { status: u16, error: String },
     /// Handle the request normally, then hold the response (client timeouts).
     Delay(Duration),
+    /// Handle the request normally, with `Date` this many seconds off (a stale clock offset).
+    SkewDate(i64),
 }
 
 impl Fault {
@@ -314,6 +316,15 @@ impl Fault {
             path: path.into(),
             times: None,
             action: FaultAction::Delay(delay),
+        }
+    }
+
+    pub fn skew_date(method: &str, path: &str, secs: i64) -> Self {
+        Self {
+            method: method.into(),
+            path: path.into(),
+            times: None,
+            action: FaultAction::SkewDate(secs),
         }
     }
 

@@ -7,7 +7,7 @@ mod pi_devices;
 use std::time::Duration;
 
 use crate::{
-    FaultAction, Shared,
+    FaultAction, Shared, crypto,
     http::{Req, Resp},
     state::{RecordedRequest, State},
 };
@@ -70,6 +70,10 @@ pub(crate) fn handle(shared: &Shared, req: &Req, cid: &str) -> (Resp, Option<Dur
             return (Resp::oauth_error(status, &error), None);
         }
         Some(FaultAction::Delay(d)) => delay = Some(d),
+        Some(FaultAction::SkewDate(secs)) => {
+            let date = crypto::http_date(st.now() + secs);
+            return (route(&mut st, &ctx, req).with_header("Date", &date), None);
+        }
         None => {}
     }
     (route(&mut st, &ctx, req), delay)

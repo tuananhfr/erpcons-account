@@ -288,7 +288,9 @@ fn serve(shared: &Shared, mut request: tiny_http::Request) {
         .with_status_code(tiny_http::StatusCode(resp.status));
     let mut headers = resp.headers.clone();
     let now = shared.state().now();
-    headers.push(("Date".into(), crypto::http_date(now)));
+    if !resp.has_header("Date") {
+        headers.push(("Date".into(), crypto::http_date(now)));
+    }
     if req.path.starts_with(handlers::API_PREFIX) {
         headers.push(("X-Correlation-Id".into(), cid));
     }
