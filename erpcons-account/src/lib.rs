@@ -31,8 +31,8 @@ pub use backoff::Backoff;
 pub use catalog::{BuiltinFeature, Tier, is_pinned_free, is_valid_feature_id};
 pub use clock::{Clock, SystemClock};
 pub use config::{
-    Config, DESKTOP_CLIENT_ID, DESKTOP_SCOPES, PI_API_PATH, PLATFORM_KEYS, PinnedKey, Platform,
-    Product,
+    ClientProfile, Config, DESKTOP_CLIENT_ID, DESKTOP_SCOPES, PI_API_PATH, PLATFORM_KEYS,
+    PinnedKey, Platform, Product,
 };
 pub use error::{ApiCode, ApiError, Error, RevocationReason, VerifyError};
 pub use secrets::{

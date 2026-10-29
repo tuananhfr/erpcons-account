@@ -555,3 +555,42 @@ fn pi_me_maps_to_identity() {
     let failed = json!({"ok": false, "message": "Lỗi hệ thống."});
     assert!(crate::me::parse(failed.to_string().as_bytes()).is_err());
 }
+
+#[test]
+fn ubotcad_profile_values() {
+    let cfg = crate::Config::new(ISSUER, Product::UbotBuild, "0.9.0");
+    assert_eq!(cfg.client_id, "ubotcad-desktop");
+    assert_eq!(cfg.user_agent, "UbotCAD/0.9.0");
+    assert_eq!(cfg.profile, crate::ClientProfile::UBOTCAD);
+}
+
+#[test]
+fn office_profile_unchanged() {
+    let cfg = crate::Config::new(ISSUER, Product::VanBan, "0.6.5");
+    assert_eq!(cfg.client_id, DESKTOP_CLIENT_ID);
+    assert_eq!(cfg.user_agent, "ERPCons-VanBan/0.6.5");
+    assert_eq!(cfg.profile.keyring_service, crate::SERVICE);
+}
+
+#[test]
+fn ubotbuild_feature_ids() {
+    assert!(is_valid_feature_id("ubotbuild.cad.use"));
+    assert!(is_pinned_free("ubotbuild.cad.view"));
+    assert!(is_pinned_free("ubotbuild.cad.export"));
+    assert!(!is_pinned_free("ubotbuild.cad.use"));
+    assert!(!is_pinned_free("ubotbuild.view"));
+    assert!(is_pinned_free("vanban.view"));
+    assert!(!is_pinned_free("vanban.x.view"));
+}
+
+#[test]
+fn ubotbuild_builtin_defaults() {
+    assert_eq!(
+        BuiltinFeature::defaults(Product::UbotBuild),
+        vec![
+            BuiltinFeature::new("ubotbuild.cad.view", Tier::Free),
+            BuiltinFeature::new("ubotbuild.cad.export", Tier::Free),
+            BuiltinFeature::new("ubotbuild.cad.use", Tier::Pro),
+        ]
+    );
+}

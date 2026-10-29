@@ -29,11 +29,24 @@ impl BuiltinFeature {
         }
     }
 
-    /// `<product>.view`, `.export` and `.use`, all free (products.md §2).
+    /// Office: `<product>.view`, `.export` and `.use`, all free (products.md §2).
+    /// UbotCAD: `cad.view` and `cad.export` free, `cad.use` pro.
     pub fn defaults(product: Product) -> Vec<Self> {
-        ["view", "export", "use"]
+        let names: [(&str, Tier); 3] = match product {
+            Product::UbotBuild => [
+                ("cad.view", Tier::Free),
+                ("cad.export", Tier::Free),
+                ("cad.use", Tier::Pro),
+            ],
+            _ => [
+                ("view", Tier::Free),
+                ("export", Tier::Free),
+                ("use", Tier::Free),
+            ],
+        };
+        names
             .into_iter()
-            .map(|name| Self::new(format!("{}.{name}", product.id()), Tier::Free))
+            .map(|(name, tier)| Self::new(format!("{}.{name}", product.id()), tier))
             .collect()
     }
 }
@@ -53,9 +66,13 @@ pub fn is_valid_feature_id(feature: &str) -> bool {
         })
 }
 
-/// `<product>.view` and `<product>.export` are free whatever a catalog says (HS02).
+/// A product's view and export features are free whatever a catalog says (HS02).
 pub fn is_pinned_free(feature: &str) -> bool {
-    is_valid_feature_id(feature) && matches!(feature.split_once('.'), Some((_, "view" | "export")))
+    is_valid_feature_id(feature)
+        && feature
+            .split_once('.')
+            .and_then(|(product, name)| Some((Product::from_id(product)?, name)))
+            .is_some_and(|(product, name)| product.pinned_free_suffixes().contains(&name))
 }
 
 pub(crate) fn belongs_to(feature: &str, product: Product) -> bool {

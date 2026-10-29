@@ -24,11 +24,22 @@ pub enum Product {
     BangTinh,
     TrinhChieu,
     Pdf,
+    /// UbotCAD, the UbotBuild desktop app.
+    UbotBuild,
 }
 
 impl Product {
     /// Every product, in registry order.
-    pub const ALL: [Product; 4] = [
+    pub const ALL: [Product; 5] = [
+        Product::VanBan,
+        Product::BangTinh,
+        Product::TrinhChieu,
+        Product::Pdf,
+        Product::UbotBuild,
+    ];
+
+    /// The four Office products.
+    pub const OFFICE: [Product; 4] = [
         Product::VanBan,
         Product::BangTinh,
         Product::TrinhChieu,
@@ -42,6 +53,7 @@ impl Product {
             Self::BangTinh => "bangtinh",
             Self::TrinhChieu => "trinhchieu",
             Self::Pdf => "pdf",
+            Self::UbotBuild => "ubotbuild",
         }
     }
 
@@ -57,8 +69,66 @@ impl Product {
             Self::BangTinh => "BangTinh",
             Self::TrinhChieu => "TrinhChieu",
             Self::Pdf => "PDF",
+            Self::UbotBuild => "UbotCAD",
         }
     }
+
+    /// Client family this product signs in as.
+    pub fn profile(self) -> ClientProfile {
+        match self {
+            Self::UbotBuild => ClientProfile::UBOTCAD,
+            _ => ClientProfile::OFFICE,
+        }
+    }
+
+    /// Feature names (after `<product>.`) that stay free whatever a catalog says.
+    pub fn pinned_free_suffixes(self) -> &'static [&'static str] {
+        match self {
+            Self::UbotBuild => &["cad.view", "cad.export"],
+            _ => &["view", "export"],
+        }
+    }
+}
+
+/// Identity and storage names of one desktop app family sharing this library.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClientProfile {
+    pub client_id: &'static str,
+    pub scopes: &'static str,
+    pub keyring_service: &'static str,
+    pub dir_windows: &'static str,
+    pub dir_macos: &'static str,
+    pub dir_linux: &'static str,
+    /// Prefix of the `User-Agent` product token, before [`Product::agent_name`].
+    pub agent_prefix: &'static str,
+    pub app_title: &'static str,
+    pub products: &'static [Product],
+}
+
+impl ClientProfile {
+    pub const OFFICE: Self = Self {
+        client_id: DESKTOP_CLIENT_ID,
+        scopes: DESKTOP_SCOPES,
+        keyring_service: "ERPCons Office PI",
+        dir_windows: "ERPCons\\PI",
+        dir_macos: "ERPCons/PI",
+        dir_linux: "erpcons/pi",
+        agent_prefix: "ERPCons-",
+        app_title: "ERPCons",
+        products: &Product::OFFICE,
+    };
+
+    pub const UBOTCAD: Self = Self {
+        client_id: "ubotcad-desktop",
+        scopes: DESKTOP_SCOPES,
+        keyring_service: "UbotCAD PI",
+        dir_windows: "UbotCAD\\PI",
+        dir_macos: "UbotCAD/PI",
+        dir_linux: "ubotcad/pi",
+        agent_prefix: "",
+        app_title: "UbotCAD",
+        products: &[Product::UbotBuild],
+    };
 }
 
 /// Desktop operating system reported to the platform.
@@ -106,6 +176,7 @@ pub struct Config {
     /// Base URL of PI's end-user API (`/me` below it). `None`: `{issuer}/api/v1/id` (ADR 0011).
     pub api_base: Option<String>,
     pub client_id: String,
+    pub profile: ClientProfile,
     pub product: Product,
     /// App version `major.minor.patch`, sent as `client_version`.
     pub client_version: String,
@@ -144,12 +215,18 @@ impl Config {
         client_version: impl Into<String>,
     ) -> Self {
         let client_version = client_version.into();
+        let profile = product.profile();
         Self {
             issuer: issuer.into(),
             api_base: None,
-            client_id: DESKTOP_CLIENT_ID.into(),
+            client_id: profile.client_id.into(),
+            profile,
             product,
-            user_agent: format!("ERPCons-{}/{client_version}", product.agent_name()),
+            user_agent: format!(
+                "{}{}/{client_version}",
+                profile.agent_prefix,
+                product.agent_name()
+            ),
             client_version,
             platform: Platform::current(),
             ui_locale: None,

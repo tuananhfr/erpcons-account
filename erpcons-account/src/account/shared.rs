@@ -231,7 +231,7 @@ impl Account {
 
     /// Deletes every lease file except `keep`'s.
     pub(super) fn remove_leases(&self, keep: Option<Product>) -> Result<(), Error> {
-        for p in Product::ALL.into_iter().filter(|p| Some(*p) != keep) {
+        for p in Product::OFFICE.into_iter().filter(|p| Some(*p) != keep) {
             storage::remove(&self.paths.lease(p))?;
         }
         let mut view = self.view_mut();
@@ -300,7 +300,7 @@ impl Account {
     pub(super) fn load_leases(&self, ops: &mut Ops) -> Result<(), Error> {
         let mut leases = std::collections::BTreeMap::new();
         let mut invalid_own = false;
-        for p in Product::ALL {
+        for p in Product::OFFICE {
             match self.read_lease(ops, p)? {
                 Some(Ok(slot)) => {
                     leases.insert(p, slot);

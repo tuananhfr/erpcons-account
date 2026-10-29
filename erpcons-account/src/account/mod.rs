@@ -138,7 +138,7 @@ impl Account {
         let now = self.effective_now();
         let s = &view.session;
         let profile = s.profile.as_ref();
-        let licences: BTreeMap<Product, LicenceState> = Product::ALL
+        let licences: BTreeMap<Product, LicenceState> = Product::OFFICE
             .into_iter()
             .map(|p| (p, self.licence(&view, p, now)))
             .collect();
