@@ -210,12 +210,14 @@ impl Account {
             .id_token
             .as_deref()
             .ok_or(Error::InvalidIdToken("missing"))?;
+        // System time, not effective_now: a floor left ahead by a once-fast clock only comes down
+        // with a lease, and a lease needs this sign-in first.
         let sub = oidc::check_id_token(
             id_token,
             &self.cfg.issuer,
             &self.cfg.client_id,
             nonce,
-            self.effective_now(),
+            self.cfg.clock.unix_now(),
         )?;
         let url = self.cfg.pi_url("/me");
         let reply = self.http.retrying(Retry::Idempotent, || {

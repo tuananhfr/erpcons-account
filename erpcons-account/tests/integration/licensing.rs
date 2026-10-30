@@ -521,6 +521,18 @@ fn clock_rollback_cannot_extend_a_lease() {
 }
 
 #[test]
+fn sign_in_works_after_a_fast_clock_was_set_right() {
+    let env = Env::licensing(licensed());
+    let account = env.cad();
+    env.clock.set_unix(crate::common::T0 + 13 * 3600);
+    account.diagnostics();
+    env.clock.set_unix(crate::common::T0);
+    sign_in(&account);
+    assert!(matches!(licence(&account), LicenceState::Active { .. }));
+    assert!(account.allowed(PRO));
+}
+
+#[test]
 fn expiry_warnings_at_7_3_1_days_once_each() {
     let env = Env::licensing(pro_scenario(30));
     let account = env.cad();

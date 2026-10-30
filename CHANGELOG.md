@@ -14,6 +14,9 @@
 
 ### Fixed
 
+- Sign-in checks the ID token `exp` against system time, not `effective_now`. A `trusted_floor`
+  left ahead by a clock that once ran fast blocked sign-in (`InvalidIdToken("exp")`) until real
+  time caught up, and only a lease received after sign-in can lower it.
 - A 404 at refresh re-activates only when it is PI's JSON envelope (`ApiCode::DeviceUnknown`); the
   old lease and device id stay until the new activation succeeds. Other 404s keep the lease.
 - Every 422 `errors.timestamp` at refresh undoes the persisted `last_refresh_ts`, and a timestamp
