@@ -13,9 +13,17 @@ pub const DESKTOP_SCOPES: &str = "openid profile email offline_access pi.entitle
 pub const PI_API_PATH: &str = "/api/v1/id";
 /// Platform licence-signing keys pinned in release builds, as `(kid, Ed25519 public key)`.
 ///
-/// Empty until the PI Platform issues its keys (lease.md §10). Development keys, such as the
-/// pi-mock key, are passed through [`Config::platform_keys`] and never listed here.
-pub const PLATFORM_KEYS: &[(&str, [u8; 32])] = &[];
+/// Copied from production PI's `/id/lease-keys.json` (lease.md §10). PI rotates by publishing a
+/// new key last and moving it first only after 90 days, so a release adding it here has time to
+/// ship. Development keys, such as the pi-mock key, go through [`Config::platform_keys`] instead.
+pub const PLATFORM_KEYS: &[(&str, [u8; 32])] = &[(
+    "lease-2026-10",
+    [
+        0x9f, 0x06, 0x2c, 0x41, 0x36, 0x86, 0xfa, 0x85, 0x6b, 0x50, 0xcb, 0x6f, 0xeb, 0xf2, 0xf5,
+        0x5f, 0xaf, 0x1f, 0x07, 0x80, 0xb4, 0x1b, 0x44, 0xf8, 0x6a, 0x92, 0xc5, 0x9c, 0x64, 0x6e,
+        0x12, 0x50,
+    ],
+)];
 
 /// Office product, also the `product_id` of the PI product registry (ADR 0007).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

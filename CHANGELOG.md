@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.2
+
+### Added
+
+- `PLATFORM_KEYS` pins production PI's lease-signing key `lease-2026-10`, so release builds can
+  verify leases without a development key.
+
 ## 0.4.1
 
 ### Breaking
