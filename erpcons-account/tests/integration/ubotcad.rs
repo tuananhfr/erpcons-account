@@ -49,6 +49,22 @@ fn ubotcad_lease_grants_cad_use() {
     ));
 }
 
+/// UbotCAD's app id is its PI product code: the 0.5.0 clean-up of app-id files keeps its lease.
+#[test]
+fn ubotcad_lease_survives_a_new_process() {
+    let env = Env::licensing(scenario());
+    sign_in(&ubotcad(&env));
+    let next = ubotcad(&env);
+    assert!(env.file("lease-ubotbuild.json").exists());
+    assert!(matches!(
+        signed_in(next.status()).licence,
+        LicenceState::Active { .. }
+    ));
+    assert!(next.allowed(USE));
+    next.refresh().unwrap();
+    assert_eq!(env.count("POST", crate::common::ACTIVATE), 1);
+}
+
 #[test]
 fn ubotcad_revoked_device_keeps_view() {
     let env = Env::licensing(scenario());

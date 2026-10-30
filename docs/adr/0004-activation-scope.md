@@ -2,7 +2,8 @@
 
 Status: Accepted (owner decisions). Suspended in part by ADR 0011: signed-in desktop apps do not
 activate while `Config::offline_licensing` is off (the default), because PI cannot yet issue Office
-leases that pass `lease.md` §9.
+leases that pass `lease.md` §9. ADR 0013 lifts the suspension for Office (opt-in per app) and
+replaces "each app activates its own `product_id`" with one PI product, `erpconsoffice`.
 
 ## Context
 

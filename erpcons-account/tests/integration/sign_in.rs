@@ -25,8 +25,8 @@ fn happy_path_signs_in_against_pi_and_sends_contract_headers() {
     assert!(s.online && !s.session_only && !s.reauth_required);
     assert!(env.store.get(REFRESH_TOKEN_ENTRY).unwrap().is_some());
     assert!(env.file("session.json").exists());
-    assert!(!env.file("lease-vanban.json").exists());
-    assert!(!env.file("catalog-vanban.jws").exists());
+    assert!(!env.file("lease-erpconsoffice.json").exists());
+    assert!(!env.file("catalog-erpconsoffice.jws").exists());
     assert!(env.server.device_rows().is_empty());
 
     let dir = env.dir.path().to_string_lossy().into_owned();

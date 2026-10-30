@@ -9,6 +9,14 @@ use crate::{
 pub const DESKTOP_CLIENT_ID: &str = "erpcons-office-desktop";
 /// Scopes requested by the desktop client (contract §1).
 pub const DESKTOP_SCOPES: &str = "openid profile email offline_access pi.entitlements pi.devices";
+/// PI product code of the four Office apps (ADR 0013).
+pub const OFFICE_PI_PRODUCT: &str = "erpconsoffice";
+/// Open and display files in an Office app; pinned free.
+pub const OFFICE_VIEW: &str = "erpconsoffice.view";
+/// Save, export and print in an Office app; pinned free.
+pub const OFFICE_EXPORT: &str = "erpconsoffice.export";
+/// Create and edit in an Office app: `pro`, granted by the lease (ADR 0013).
+pub const OFFICE_USE: &str = "erpconsoffice.use";
 /// Path of PI's end-user API on the issuer's host (ADR 0011).
 pub const PI_API_PATH: &str = "/api/v1/id";
 /// Platform licence-signing keys pinned in release builds, as `(kid, Ed25519 public key)`.
@@ -25,7 +33,8 @@ pub const PLATFORM_KEYS: &[(&str, [u8; 32])] = &[(
     ],
 )];
 
-/// Office product, also the `product_id` of the PI product registry (ADR 0007).
+/// The app: its `User-Agent`, update id and client family (ADR 0007). What PI licenses is the
+/// family's [`ClientProfile::pi_product`] (ADR 0013).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Product {
     VanBan,
@@ -54,7 +63,7 @@ impl Product {
         Product::Pdf,
     ];
 
-    /// Registry id (`vanban`, `bangtinh`, `trinhchieu`, `pdf`).
+    /// App id (`vanban`, `bangtinh`, `trinhchieu`, `pdf`, `ubotbuild`), as `erpcons-update` uses it.
     pub fn id(self) -> &'static str {
         match self {
             Self::VanBan => "vanban",
@@ -65,7 +74,7 @@ impl Product {
         }
     }
 
-    /// Product for a registry id.
+    /// Product for an app id.
     pub fn from_id(id: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|p| p.id() == id)
     }
@@ -89,12 +98,14 @@ impl Product {
         }
     }
 
-    /// Feature names (after `<product>.`) that stay free whatever a catalog says.
+    /// PI product code that licenses this app: `erpconsoffice` for the four Office apps.
+    pub fn pi_product(self) -> &'static str {
+        self.profile().pi_product
+    }
+
+    /// Feature names (after `<pi_product>.`) that stay free whatever a catalog says.
     pub fn pinned_free_suffixes(self) -> &'static [&'static str] {
-        match self {
-            Self::UbotBuild => &["cad-view", "cad-export"],
-            _ => &["view", "export"],
-        }
+        self.profile().pinned_free
     }
 }
 
@@ -111,6 +122,11 @@ pub struct ClientProfile {
     pub agent_prefix: &'static str,
     pub app_title: &'static str,
     pub products: &'static [Product],
+    /// PI product code shared by every app of the family: one device, one lease and one set of
+    /// feature ids (`<pi_product>.<code>`) per machine, OS user and organization (ADR 0013).
+    pub pi_product: &'static str,
+    /// Feature codes that stay free whatever a catalog says (HS02: view and export).
+    pub pinned_free: &'static [&'static str],
 }
 
 impl ClientProfile {
@@ -124,6 +140,8 @@ impl ClientProfile {
         agent_prefix: "ERPCons-",
         app_title: "ERPCons",
         products: &Product::OFFICE,
+        pi_product: OFFICE_PI_PRODUCT,
+        pinned_free: &["view", "export"],
     };
 
     pub const UBOTCAD: Self = Self {
@@ -136,7 +154,17 @@ impl ClientProfile {
         agent_prefix: "",
         app_title: "UbotCAD",
         products: &[Product::UbotBuild],
+        pi_product: "ubotbuild",
+        pinned_free: &["cad-view", "cad-export"],
     };
+
+    /// Every client family.
+    pub const ALL: [Self; 2] = [Self::OFFICE, Self::UBOTCAD];
+
+    /// The family licensed by PI product `code`.
+    pub fn for_pi_product(code: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.pi_product == code)
+    }
 }
 
 /// Desktop operating system reported to the platform.
@@ -203,8 +231,8 @@ pub struct Config {
     /// Longest wait a call spends on its own retries before returning the error.
     pub max_retry_wait: Duration,
     /// Device activation, offline leases and online entitlements through PI's device protocol
-    /// (ADR 0012). Off by default: none of their endpoints is called. UbotCAD turns it on; PI has
-    /// no Office product, so Office keeps it off.
+    /// (ADR 0012). Off by default: none of their endpoints is called and `pro` features (Office:
+    /// [`OFFICE_USE`]) are denied. UbotCAD and, from 0.5.0, the Office desktop apps turn it on.
     pub offline_licensing: bool,
     /// How long `sign_in` and `select_org` wait for the browser callback.
     pub sign_in_timeout: Duration,

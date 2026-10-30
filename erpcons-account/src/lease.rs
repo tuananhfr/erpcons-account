@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 
 use serde_json::{Map, Value};
 
-use crate::{PinnedKey, Product, VerifyError, jose, pi_device::compose_features, time};
+use crate::{PinnedKey, VerifyError, jose, pi_device::compose_features, time};
 
 pub(crate) const LEASE_TYP: &str = "pi-lease+jwt";
 const MAX_WINDOW: i64 = 7_776_000;
@@ -34,7 +34,8 @@ pub(crate) struct Lease {
     /// `device`.
     pub device_id: String,
     pub tenant: String,
-    pub product: Product,
+    /// PI product code (`erpconsoffice`, `ubotbuild`).
+    pub product: String,
     /// `<product>.<code>`, without PI's internal codes.
     pub features: Vec<String>,
     pub nbf: i64,
@@ -49,7 +50,8 @@ pub(crate) struct Lease {
 pub(crate) struct Expect<'a> {
     pub issuer: &'a str,
     pub audience: &'a str,
-    pub product: Product,
+    /// PI product code of the client family.
+    pub product: &'a str,
     pub sub: &'a str,
     pub org: Option<&'a str>,
     pub jkt: &'a str,
@@ -110,7 +112,7 @@ pub(crate) fn verify(jws: &str, keys: &[PinnedKey], e: &Expect) -> Result<Lease,
         org,
         device_id: string(&p, "device")?.to_owned(),
         tenant: string(&p, "tenant")?.to_owned(),
-        product: Product::from_id(string(&p, "product")?).ok_or(VerifyError::Product)?,
+        product: string(&p, "product")?.to_owned(),
         features: Vec::new(),
         nbf: int(&p, "nbf")?,
         iat: int(&p, "iat")?,
@@ -170,7 +172,7 @@ impl Lease {
     pub(crate) fn check_copies(&self, c: &Copies) -> Result<(), VerifyError> {
         let set = |v: &[String]| v.iter().cloned().collect::<BTreeSet<_>>();
         let rights =
-            compose_features(self.product, c.rights).map_err(|_| VerifyError::CopyMismatch)?;
+            compose_features(&self.product, c.rights).map_err(|_| VerifyError::CopyMismatch)?;
         if set(&rights) != set(&self.features)
             || c.entitlement_id.is_some_and(|t| t != self.tenant)
             || time::parse_rfc3339(c.offline_valid_until) != Some(self.exp)

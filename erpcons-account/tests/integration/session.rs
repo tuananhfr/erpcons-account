@@ -61,7 +61,7 @@ fn reuse_detection_signs_out() {
     assert_eq!(next.status(), Status::Guest);
     assert_eq!(env.refresh_token(), None);
     assert!(env.store.get(DEVICE_ENTRY).unwrap().is_some());
-    assert!(!env.file("lease-vanban.json").exists());
+    assert!(!env.file("lease-erpconsoffice.json").exists());
     account.reload().unwrap();
     assert_eq!(account.status(), Status::Guest);
 }
@@ -225,7 +225,7 @@ fn guest_allows_free_built_in_features_only() {
     // The built-in tiers decide: no catalog is fetched.
     assert!(env.server.requests().is_empty());
     assert!(!account.allowed("ubotbuild.unknown"));
-    assert!(!account.allowed("vanban.use"));
+    assert!(!account.allowed(erpcons_account::OFFICE_USE));
 }
 
 #[test]

@@ -245,7 +245,11 @@ fn mock_tokens_match_pi_id() {
     let claims = json_of(&payload);
     assert_eq!(claims["iss"], server.issuer());
     assert_eq!(claims["sub"], DEFAULT_USER);
-    assert_eq!(claims["aud"], serde_json::json!(["pi-platform"]));
+    // The Office clients carry product `erpconsoffice` (ADR 0013).
+    assert_eq!(
+        claims["aud"],
+        serde_json::json!(["pi-platform", "erpconsoffice"])
+    );
     assert_eq!(claims["azp"], "erpcons-office-desktop");
     assert_eq!(claims["org_context"], Value::Null);
     assert_eq!(

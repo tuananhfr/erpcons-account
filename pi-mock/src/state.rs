@@ -3,7 +3,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     Fault, FaultAction, Scenario,
-    scenario::{Client, DESKTOP_CLIENT, Membership, UBOTCAD_CLIENT, User, WEB_CLIENT},
+    scenario::{
+        Client, DESKTOP_CLIENT, Membership, OFFICE_PRODUCT, UBOTCAD_CLIENT, User, WEB_CLIENT,
+    },
 };
 
 /// PI `IdMeta`: authorization code 60 s, refresh token 30 days (sliding).
@@ -151,25 +153,25 @@ impl State {
         self.counter
     }
 
-    /// The two Office clients of decision 1, UbotCAD's desktop client, then the scenario's extra clients.
+    /// The two Office clients of decision 1 (product `erpconsoffice`, PI D577), UbotCAD's desktop
+    /// client, then the scenario's extra clients.
     pub(crate) fn clients(&self) -> Vec<Client> {
         let mut web = Client::new(WEB_CLIENT, &[], WEB_SCOPES);
         web.redirect_uris = self.scenario.web_redirect_uris.clone();
+        web.product = Some(OFFICE_PRODUCT.into());
+        let mut desktop = Client::new(
+            DESKTOP_CLIENT,
+            &["http://127.0.0.1/callback"],
+            DESKTOP_SCOPES,
+        );
+        desktop.product = Some(OFFICE_PRODUCT.into());
         let mut ubotcad = Client::new(
             UBOTCAD_CLIENT,
             &["http://127.0.0.1/callback"],
             DESKTOP_SCOPES,
         );
         ubotcad.product = Some("ubotbuild".into());
-        let mut all = vec![
-            Client::new(
-                DESKTOP_CLIENT,
-                &["http://127.0.0.1/callback"],
-                DESKTOP_SCOPES,
-            ),
-            ubotcad,
-            web,
-        ];
+        let mut all = vec![desktop, ubotcad, web];
         all.extend(self.scenario.extra_clients.iter().cloned());
         all
     }

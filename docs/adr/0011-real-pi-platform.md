@@ -1,6 +1,8 @@
 # ADR 0011: Connecting to the real PI Platform
 
-Superseded in part by [ADR 0012](0012-pi-device-protocol.md) (device protocol and lease claims).
+Superseded in part by [ADR 0012](0012-pi-device-protocol.md) (device protocol and lease claims)
+and, for Office, by [ADR 0013](0013-office-licensing-one-product.md): Office licensing is on again,
+as one PI product `erpconsoffice`.
 
 Status: Accepted (owner decisions of 28/10/2026). Supersedes, where they differ, the OIDC and
 identity parts of `contract.openapi.yaml`, ADR 0008, and the "every signed-in desktop app

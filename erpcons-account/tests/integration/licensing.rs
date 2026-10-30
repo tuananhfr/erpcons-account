@@ -4,7 +4,7 @@ use erpcons_account::{
     Account, ApiCode, BuiltinFeature, Error, LicenceState, Product, Status, Tier, VerifyError,
     WarningStage,
 };
-use pi_mock::{DEFAULT_USER, Fault, LeaseTamper, ORG_A, ORG_B, Scenario, Tenant};
+use pi_mock::{DEFAULT_USER, Fault, LeaseTamper, ORG_A, ORG_B, Scenario};
 use serde_json::Value;
 
 use crate::common::{
@@ -344,41 +344,6 @@ fn rejected_timestamps_are_all_undone() {
 }
 
 #[test]
-fn four_apps_get_one_device_row_per_product() {
-    let mut scenario = Scenario {
-        tenants: vec![
-            Tenant::new("ten_vb", ORG_A, "vanban", &["use", "offline"]),
-            Tenant::new("ten_bt", ORG_A, "bangtinh", &["use", "offline"]),
-        ],
-        ..licensed()
-    };
-    scenario
-        .products
-        .extend(["vanban".into(), "bangtinh".into()]);
-    let env = Env::licensing(scenario);
-    let vanban = env.account();
-    sign_in(&vanban);
-    let bangtinh = env.account_for(Product::BangTinh);
-    bangtinh.refresh().unwrap();
-    assert!(matches!(licence(&bangtinh), LicenceState::Active { .. }));
-    let rows = env.server.device_rows();
-    assert_eq!(rows.len(), 2);
-    assert_eq!(
-        rows.iter().map(|r| r.product.as_str()).collect::<Vec<_>>(),
-        ["vanban", "bangtinh"]
-    );
-    assert!(env.file("lease-vanban.json").exists());
-    assert!(env.file("lease-bangtinh.json").exists());
-    vanban.reload().unwrap();
-    let all = signed_in(vanban.status()).licences;
-    assert!(matches!(
-        all[&Product::BangTinh],
-        LicenceState::Active { .. }
-    ));
-    assert_eq!(all[&Product::Pdf], LicenceState::NotActivated);
-}
-
-#[test]
 fn retry_after_timeout_reuses_the_idempotency_key() {
     let env = Env::licensing(Scenario {
         faults: vec![Fault::delay("POST", ACTIVATE, Duration::from_secs(3)).times(1)],
@@ -562,39 +527,6 @@ fn no_warning_while_every_built_in_feature_is_free() {
     assert!(matches!(licence(&account), LicenceState::Active { .. }));
     env.advance(29 * DAY);
     assert_eq!(signed_in(account.status()).warning, None);
-}
-
-#[test]
-fn revoked_device_wipes_every_lease() {
-    let mut scenario = Scenario {
-        tenants: vec![
-            Tenant::new("ten_vb", ORG_A, "vanban", &["use", "offline"]),
-            Tenant::new("ten_pdf", ORG_A, "pdf", &["use", "offline"]),
-        ],
-        ..licensed()
-    };
-    scenario.products.extend(["vanban".into(), "pdf".into()]);
-    let env = Env::licensing(scenario);
-    let account = env.account();
-    sign_in(&account);
-    let other = env.account_for(Product::Pdf);
-    other.refresh().unwrap();
-    let device = account.diagnostics().device_id.unwrap();
-    assert!(env.server.revoke_device(&device));
-    env.advance(13 * 3600);
-    let err = account.refresh().unwrap_err();
-    assert!(
-        matches!(&err, Error::Api(e) if e.code == ApiCode::DeviceRevoked),
-        "{err:?}"
-    );
-    assert!(!env.file("lease-vanban.json").exists());
-    assert!(!env.file("lease-pdf.json").exists());
-    assert_eq!(licence(&account), LicenceState::DeviceRevoked);
-    let calls = env.count("POST", ACTIVATE);
-    account.refresh().unwrap();
-    other.refresh().unwrap();
-    assert_eq!(env.count("POST", ACTIVATE), calls);
-    assert_eq!(licence(&other), LicenceState::DeviceRevoked);
 }
 
 #[test]

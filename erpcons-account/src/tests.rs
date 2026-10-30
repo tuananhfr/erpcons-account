@@ -5,8 +5,9 @@ use ed25519_dalek::{Signer, SigningKey};
 use serde_json::{Value, json};
 
 use crate::{
-    ApiCode, Backoff, BuiltinFeature, DESKTOP_CLIENT_ID, Error, PLATFORM_KEYS, PinnedKey, Product,
-    Tier, VerifyError,
+    ApiCode, Backoff, BuiltinFeature, ClientProfile, DESKTOP_CLIENT_ID, Error, OFFICE_EXPORT,
+    OFFICE_PI_PRODUCT, OFFICE_USE, OFFICE_VIEW, PLATFORM_KEYS, PinnedKey, Product, Tier,
+    VerifyError,
     catalog::{self, is_pinned_free, is_valid_feature_id},
     device, entitlements, jose,
     lease::{self, Copies, Expect},
@@ -109,7 +110,7 @@ fn pi_expect() -> Expect<'static> {
     Expect {
         issuer: ISSUER,
         audience: UBOTCAD,
-        product: Product::UbotBuild,
+        product: "ubotbuild",
         sub: PI_USER,
         org: Some(PI_ORG),
         jkt: PI_JKT,
@@ -185,7 +186,7 @@ fn pi_lease_claim_checks_fail_in_order() {
         ),
         (
             Expect {
-                product: Product::VanBan,
+                product: OFFICE_PI_PRODUCT,
                 ..pi_expect()
             },
             VerifyError::Product,
@@ -338,7 +339,7 @@ fn v030_lease_is_rejected() {
     let e = Expect {
         issuer: ISSUER,
         audience: DESKTOP_CLIENT_ID,
-        product: Product::VanBan,
+        product: OFFICE_PI_PRODUCT,
         sub: "usr_01JB6Z2K8Q4XN3T5V7W9Y1A2C3",
         org: Some("org_01JB6Z3M5R7T9V1X3Z5B7D9F1H"),
         jkt: "n5qSxkI9wZW-xoKQMjjpdmktYTcLmdyB_lG9XaQhqLM",
@@ -357,18 +358,15 @@ fn device_thumbprint_is_pi_raw_key_hash() {
 }
 
 #[test]
-fn vector_catalog_verifies() {
-    let c = catalog::verify(CATALOG_VANBAN, &keys(), ISSUER, Product::VanBan, 0).unwrap();
-    assert_eq!(c.version, 1);
-    assert_eq!(c.tiers.len(), 3);
-    assert!(c.tiers.values().all(|t| *t == Tier::Free));
+fn v030_catalog_is_rejected() {
+    // Signed for app id `vanban`: Office features are `erpconsoffice.*` since 0.5.0.
     assert_eq!(
-        catalog::verify(CATALOG_VANBAN, &keys(), ISSUER, Product::VanBan, 2).unwrap_err(),
-        VerifyError::Downgrade
+        catalog::verify(CATALOG_VANBAN, &keys(), ISSUER, OFFICE_PI_PRODUCT, 0).unwrap_err(),
+        VerifyError::Product
     );
     assert_eq!(
-        catalog::verify(CATALOG_VANBAN, &keys(), ISSUER, Product::Pdf, 0).unwrap_err(),
-        VerifyError::Product
+        catalog::verify(CATALOG_VANBAN, &keys(), ISSUER, "vanban", 0).unwrap_err(),
+        VerifyError::Feature
     );
     // Explicit typing: a catalog is never a lease and a lease never a catalog.
     assert_eq!(
@@ -376,7 +374,7 @@ fn vector_catalog_verifies() {
         VerifyError::Header
     );
     assert_eq!(
-        catalog::verify(LEASE_ACTIVATION, &keys(), ISSUER, Product::VanBan, 0).unwrap_err(),
+        catalog::verify(LEASE_ACTIVATION, &keys(), ISSUER, OFFICE_PI_PRODUCT, 0).unwrap_err(),
         VerifyError::Header
     );
 }
@@ -403,7 +401,7 @@ fn row(org: &str, product: &str, decision: &str, seat: bool, codes: &[&str]) -> 
 
 fn parse_rows(rows: Vec<Value>) -> Result<Vec<(String, bool)>, Error> {
     let body = json!({"ok": true, "items": rows}).to_string();
-    entitlements::parse(body.as_bytes(), Product::UbotBuild, PI_ORG).map(|list| {
+    entitlements::parse(body.as_bytes(), "ubotbuild", PI_ORG).map(|list| {
         list.into_iter()
             .map(|e| (e.feature, e.offline_allowed))
             .collect()
@@ -516,17 +514,30 @@ fn strict_json_objects() {
 
 #[test]
 fn feature_ids_and_tiers() {
-    for ok in ["vanban.view", "pdf.use", "bangtinh.a_b.c1"] {
+    for ok in [
+        "erpconsoffice.view",
+        "erpconsoffice.use",
+        "erpconsoffice.a_b.c1",
+    ] {
         assert!(is_valid_feature_id(ok), "{ok}");
     }
-    for bad in ["vanban", "word.use", "vanban.", "vanban.Use", "vanban..x"] {
+    for bad in [
+        "erpconsoffice",
+        "word.use",
+        "erpconsoffice.",
+        "erpconsoffice.Use",
+        "erpconsoffice..x",
+        // App ids stopped being feature prefixes in 0.5.0 (ADR 0013).
+        "vanban.use",
+        "pdf.view",
+    ] {
         assert!(!is_valid_feature_id(bad), "{bad}");
     }
-    assert!(is_pinned_free("trinhchieu.export"));
-    assert!(!is_pinned_free("trinhchieu.use"));
+    assert!(is_pinned_free("erpconsoffice.export"));
+    assert!(!is_pinned_free("erpconsoffice.use"));
     let builtin = vec![
-        BuiltinFeature::new("vanban.view", Tier::Free),
-        BuiltinFeature::new("vanban.advanced", Tier::Free),
+        BuiltinFeature::new("erpconsoffice.view", Tier::Free),
+        BuiltinFeature::new("erpconsoffice.advanced", Tier::Free),
     ];
     let key = SigningKey::from_bytes(&[9; 32]);
     let pinned = vec![PinnedKey {
@@ -534,28 +545,39 @@ fn feature_ids_and_tiers() {
         key: key.verifying_key().to_bytes(),
     }];
     let payload = json!({
-        "iss": ISSUER, "product": "vanban", "catalog_version": 2, "iat": 1,
-        "features": [{"feature": "vanban.view", "tier": "pro"}, {"feature": "vanban.advanced", "tier": "pro"}]
+        "iss": ISSUER, "product": "erpconsoffice", "catalog_version": 2, "iat": 1,
+        "features": [{"feature": "erpconsoffice.view", "tier": "pro"}, {"feature": "erpconsoffice.advanced", "tier": "pro"}]
     });
     let jws = signed(
         &json!({"alg": "EdDSA", "kid": "k", "typ": "pi-feature-catalog+jwt"}),
         &payload.to_string(),
         &key,
     );
-    let c = catalog::verify(&jws, &pinned, ISSUER, Product::VanBan, 1).unwrap();
+    let c = catalog::verify(&jws, &pinned, ISSUER, OFFICE_PI_PRODUCT, 1).unwrap();
     assert_eq!(
-        catalog::tier(&builtin, Some(&c), "vanban.view"),
+        catalog::tier(&builtin, Some(&c), "erpconsoffice.view"),
         Some(Tier::Free)
     );
     assert_eq!(
-        catalog::tier(&builtin, Some(&c), "vanban.advanced"),
+        catalog::tier(&builtin, Some(&c), "erpconsoffice.advanced"),
         Some(Tier::Pro)
     );
     assert_eq!(
-        catalog::tier(&builtin, None, "vanban.advanced"),
+        catalog::tier(&builtin, None, "erpconsoffice.advanced"),
         Some(Tier::Free)
     );
-    assert_eq!(catalog::tier(&builtin, Some(&c), "vanban.unknown"), None);
+    assert_eq!(
+        catalog::tier(&builtin, Some(&c), "erpconsoffice.unknown"),
+        None
+    );
+    assert_eq!(
+        catalog::verify(&jws, &pinned, ISSUER, OFFICE_PI_PRODUCT, 3).unwrap_err(),
+        VerifyError::Downgrade
+    );
+    assert_eq!(
+        catalog::verify(&jws, &pinned, ISSUER, "ubotbuild", 0).unwrap_err(),
+        VerifyError::Product
+    );
 }
 
 #[test]
@@ -746,11 +768,33 @@ fn config_rejects_product_or_client_outside_the_profile() {
 }
 
 #[test]
-fn office_profile_unchanged() {
+fn office_profile_values() {
     let cfg = crate::Config::new(ISSUER, Product::VanBan, "0.6.5");
     assert_eq!(cfg.client_id, DESKTOP_CLIENT_ID);
     assert_eq!(cfg.user_agent, "ERPCons-VanBan/0.6.5");
     assert_eq!(cfg.profile.keyring_service, crate::SERVICE);
+    assert!(!cfg.offline_licensing, "each app opts in");
+    for p in Product::OFFICE {
+        assert_eq!(p.pi_product(), "erpconsoffice", "{p:?}");
+        assert_eq!(p.pinned_free_suffixes(), ["view", "export"]);
+        assert_eq!(
+            BuiltinFeature::defaults(p),
+            vec![
+                BuiltinFeature::new(OFFICE_VIEW, Tier::Free),
+                BuiltinFeature::new(OFFICE_EXPORT, Tier::Free),
+                BuiltinFeature::new(OFFICE_USE, Tier::Pro),
+            ]
+        );
+    }
+    assert_eq!(
+        ClientProfile::for_pi_product(OFFICE_PI_PRODUCT),
+        Some(ClientProfile::OFFICE)
+    );
+    assert_eq!(
+        ClientProfile::for_pi_product("ubotbuild"),
+        Some(ClientProfile::UBOTCAD)
+    );
+    assert_eq!(ClientProfile::for_pi_product("vanban"), None);
 }
 
 #[test]
@@ -760,8 +804,11 @@ fn ubotbuild_feature_ids() {
     assert!(is_pinned_free("ubotbuild.cad-export"));
     assert!(!is_pinned_free("ubotbuild.cad-use"));
     assert!(!is_pinned_free("ubotbuild.view"));
-    assert!(is_pinned_free("vanban.view"));
-    assert!(!is_pinned_free("vanban.x.view"));
+    assert!(is_pinned_free("erpconsoffice.view"));
+    assert!(!is_pinned_free("erpconsoffice.cad-view"));
+    assert!(!is_pinned_free("erpconsoffice.x.view"));
+    assert!(!is_pinned_free("vanban.view"));
+    assert_eq!(Product::UbotBuild.pi_product(), "ubotbuild");
 }
 
 #[test]
@@ -856,7 +903,7 @@ fn compose_features_rules() {
     .map(String::from)
     .into();
     assert_eq!(
-        compose_features(Product::UbotBuild, &codes).unwrap(),
+        compose_features("ubotbuild", &codes).unwrap(),
         [
             "ubotbuild.cad-view",
             "ubotbuild.cad-use",
@@ -866,7 +913,7 @@ fn compose_features_rules() {
     assert_eq!(INTERNAL_CODES, ["offline", "offline-extended"]);
     for bad in ["CAD_USE", "-x", "a", &"a".repeat(65)] {
         assert_eq!(
-            compose_features(Product::UbotBuild, &[bad.to_string()]),
+            compose_features("ubotbuild", &[bad.to_string()]),
             Err(VerifyError::Feature),
             "{bad}"
         );

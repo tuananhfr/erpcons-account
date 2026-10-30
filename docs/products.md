@@ -5,7 +5,8 @@ decides `allowed(feature)`. Field names match `contract.openapi.yaml` and `lease
 
 ## 1. Product registry entries
 
-`product_id` reuses the app ids already used by `erpcons-update` and the forks (ADR 0007).
+The app ids reuse those of `erpcons-update` and the forks (ADR 0007). PI licenses the four apps as
+one product, code `erpconsoffice` ("ERPCons Office"; ADR 0013).
 
 | Field (HS01 V2) | `vanban` | `bangtinh` | `trinhchieu` | `pdf` |
 |---|---|---|---|---|
@@ -30,7 +31,7 @@ Common to all four:
 | API consumed | This contract (PI Platform). No Office backend |
 | Auth policy | PI ID optional; guests use every free feature (ADR 0001). Desktop: one shared session for the four apps (ADR 0010). No sign-in in embed mode (`?embed=erpcons`, `?host=parent`) in this phase (ADR 0002) |
 | Offline | Desktop: full. Web: assets cached by the site's service worker (offline behaviour not audited here) |
-| Device activation | Desktop only, signed-in users only (ADR 0004); one device per machine and OS user, one lease per product (ADR 0010) |
+| Device activation | Desktop only, signed-in users only, in an organization context, with `Config::offline_licensing` on (ADR 0004, 0012); one PI device and one `erpconsoffice` lease per machine, OS user and organization, shared by the four apps (ADR 0010, 0013) |
 | Release | Desktop: GitHub release `erpcons-v<version>` per fork with signed `update.json` (erpcons-update). Web: deploy of `office.erpcons.ai` |
 | Owner, audit evidence | To be filled by the owner (HS01 requires them; not produced here) |
 
@@ -39,18 +40,19 @@ gates any move of a feature to `pro` (§3).
 
 ## 2. Feature ids and catalog
 
-A feature id is `<product_id>.<name>`, matching
-`^(vanban|bangtinh|trinhchieu|pdf)\.[a-z0-9_]+(\.[a-z0-9_]+)*$`, at most 64 characters.
+A feature id is `<pi_product>.<name>`: a PI product code of a client family (`erpconsoffice`,
+`ubotbuild`), then dot-separated segments of lowercase letters, digits, `_` and `-` (not first), at
+most 64 characters. PI sends bare codes (`use`); the client composes the id (ADR 0012).
 
-| Feature | Scope | Tier today | Pinned free |
-|---|---|---|---|
-| `<product>.view` | Open and display files | `free` | yes |
-| `<product>.export` | Save, save as, export to every supported format, print | `free` | yes |
-| `<product>.use` | Create and edit | `free` | no |
+| Feature | Constant | Scope | Tier | Pinned free |
+|---|---|---|---|---|
+| `erpconsoffice.view` | `OFFICE_VIEW` | Open and display files | `free` | yes |
+| `erpconsoffice.export` | `OFFICE_EXPORT` | Save, save as, export to every supported format, print | `free` | yes |
+| `erpconsoffice.use` | `OFFICE_USE` | Create and edit | `pro`: needs the lease (ADR 0013) | no |
 
-That gives `vanban.view`, `vanban.export`, `vanban.use`, `bangtinh.view`, `bangtinh.export`,
-`bangtinh.use`, `trinhchieu.view`, `trinhchieu.export`, `trinhchieu.use`, `pdf.view`, `pdf.export`,
-`pdf.use`.
+The four apps share these ids: one licence covers them all. Until 0.4.x the ids were per app
+(`vanban.use`, ...); they are no longer valid. PI's free plan `office-mien-phi` grants `view`,
+`export`, `use` and its internal `offline`.
 
 Pinned free: HS02 requires that an expired or offline user can still view and export everything.
 The client therefore treats `.view` and `.export` as `free` whatever a catalog says, and logs a
@@ -61,13 +63,14 @@ catalog that marks them `pro`.
 Tiers are server data, so a feature can move to `pro` without a client release (ADR 0001).
 
 - Each client release compiles in a built-in catalog (version 0) listing every feature it gates,
-  with its tier. Today every tier is `free`.
+  with its tier. Since 0.5.0 `erpconsoffice.use` is `pro`; the others are `free`. PI has no
+  catalog endpoint yet, so the client fetches none (ADR 0011); a cached signed catalog still applies.
 - `GET /v1/products/{product_id}/feature-catalog` (public, no token) returns the signed catalog:
   JWS `typ` `pi-feature-catalog+jwt`, same JOSE profile and pinned keys as the lease
   (`lease.md` §2, §10). Payload: `iss`, `product`, `catalog_version`, `iat`, `features` (list of
   `feature` and `tier`, `free` or `pro`).
-- The client accepts a catalog when the signature, `typ` and `iss` are valid, `product` equals its
-  product, every `feature` matches §2, and `catalog_version` is not lower than the cached one (a
+- The client accepts a catalog when the signature, `typ` and `iss` are valid, `product` equals the
+  family's PI product (`erpconsoffice`), every `feature` matches §2, and `catalog_version` is not lower than the cached one (a
   higher version replaces it). It stores the verified JWS (desktop: the shared PI directory,
   `lease.md` §11; web: `localStorage`) and re-verifies it on load.
 - Fetched at start-up and every 24 h when online, for guests too. Failures keep the cached or
@@ -78,7 +81,7 @@ Tiers are server data, so a feature can move to `pro` without a client release (
 
 Declaring a future `pro` feature:
 
-1. Office ships a release whose code calls `allowed("<product>.<name>")` before the feature and
+1. Office ships a release whose code calls `allowed("erpconsoffice.<name>")` before the feature and
    lists it in the built-in catalog (tier `free` until the switch).
 2. If the feature comes from the upstream open-source editor, a licence and trademark review is
    recorded as an ADR first (HS02: do not assume the right to lock original open-source

@@ -1,7 +1,7 @@
 //! PI account client for the ERPCons Office desktop apps and UbotCAD: OIDC sign-in with PI ID,
 //! the shared desktop session, organization context and `allowed(feature)`. Device activation
-//! and offline leases speak PI's device protocol behind [`Config::offline_licensing`], which
-//! only UbotCAD turns on (ADR 0012).
+//! and offline leases speak PI's device protocol behind [`Config::offline_licensing`] (ADR 0012).
+//! The four Office apps share one PI product, `erpconsoffice` (ADR 0013).
 //!
 //! Blocking API meant for a worker thread. Specification: `docs/` of this repository.
 #[cfg(target_arch = "wasm32")]
@@ -33,8 +33,8 @@ pub use backoff::Backoff;
 pub use catalog::{BuiltinFeature, Tier, is_pinned_free, is_valid_feature_id};
 pub use clock::{Clock, SystemClock};
 pub use config::{
-    ClientProfile, Config, DESKTOP_CLIENT_ID, DESKTOP_SCOPES, PI_API_PATH, PLATFORM_KEYS,
-    PinnedKey, Platform, Product,
+    ClientProfile, Config, DESKTOP_CLIENT_ID, DESKTOP_SCOPES, OFFICE_EXPORT, OFFICE_PI_PRODUCT,
+    OFFICE_USE, OFFICE_VIEW, PI_API_PATH, PLATFORM_KEYS, PinnedKey, Platform, Product,
 };
 pub use error::{ApiCode, ApiError, Error, RevocationReason, VerifyError};
 pub use secrets::{

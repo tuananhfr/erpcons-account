@@ -2,7 +2,9 @@
 
 Status: Accepted (owner decisions of 29/10/2026). Supersedes ADR 0011's "Offline licensing is
 turned off" reasoning for the wire: the client now speaks PI's real device protocol. Office is
-unchanged because `Config::offline_licensing` stays off for it.
+unchanged because `Config::offline_licensing` stays off for it. Amended by
+[ADR 0013](0013-office-licensing-one-product.md): Office uses this protocol too, as PI product
+`erpconsoffice`, so the "Office keeps `offline_licensing` off" statements below no longer hold.
 
 ## Context
 

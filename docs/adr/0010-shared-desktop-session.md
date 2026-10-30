@@ -1,7 +1,8 @@
 # ADR 0010: One PI session per OS user for the four desktop apps
 
 Status: Accepted (owner decision). Supersedes the per-app desktop storage of ADR 0006 and the
-per-app sign-in noted in ADR 0002.
+per-app sign-in noted in ADR 0002. Amended by ADR 0013: one lease for the four apps (PI product
+`erpconsoffice`) instead of one lease per product.
 
 ## Context
 

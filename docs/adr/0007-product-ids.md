@@ -1,6 +1,7 @@
 # ADR 0007: Product ids reuse the Office app ids
 
-Status: Accepted (owner decision)
+Status: Accepted (owner decision). Amended by ADR 0013: the ids stay the app identity, but PI
+licenses the four apps as one product, `erpconsoffice`, and feature ids use that prefix.
 
 ## Context
 

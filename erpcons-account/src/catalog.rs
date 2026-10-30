@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::{PinnedKey, Product, VerifyError, jose};
+use crate::{ClientProfile, PinnedKey, Product, VerifyError, jose};
 
 pub(crate) const CATALOG_TYP: &str = "pi-feature-catalog+jwt";
 
@@ -29,7 +29,7 @@ impl BuiltinFeature {
         }
     }
 
-    /// Office: `<product>.view`, `.export` and `.use`, all free (products.md §2).
+    /// Office: `erpconsoffice.view` and `.export` free, `.use` pro (ADR 0013).
     /// UbotCAD: `cad-view` and `cad-export` free, `cad-use` pro (PI's plan codes).
     pub fn defaults(product: Product) -> Vec<Self> {
         let names: [(&str, Tier); 3] = match product {
@@ -41,23 +41,23 @@ impl BuiltinFeature {
             _ => [
                 ("view", Tier::Free),
                 ("export", Tier::Free),
-                ("use", Tier::Free),
+                ("use", Tier::Pro),
             ],
         };
         names
             .into_iter()
-            .map(|(name, tier)| Self::new(format!("{}.{name}", product.id()), tier))
+            .map(|(name, tier)| Self::new(format!("{}.{name}", product.pi_product()), tier))
             .collect()
     }
 }
 
-/// `<product_id>.<name>` as products.md §2 defines it.
+/// `<pi_product>.<name>` as products.md §2 defines it.
 pub fn is_valid_feature_id(feature: &str) -> bool {
     let Some((product, name)) = feature.split_once('.') else {
         return false;
     };
     feature.len() <= 64
-        && Product::from_id(product).is_some()
+        && ClientProfile::for_pi_product(product).is_some()
         && name.split('.').all(|seg| {
             !seg.is_empty()
                 && seg.bytes().enumerate().all(|(i, b)| {
@@ -74,8 +74,8 @@ pub fn is_pinned_free(feature: &str) -> bool {
     is_valid_feature_id(feature)
         && feature
             .split_once('.')
-            .and_then(|(product, name)| Some((Product::from_id(product)?, name)))
-            .is_some_and(|(product, name)| product.pinned_free_suffixes().contains(&name))
+            .and_then(|(product, name)| Some((ClientProfile::for_pi_product(product)?, name)))
+            .is_some_and(|(profile, name)| profile.pinned_free.contains(&name))
 }
 
 #[derive(Clone, Debug)]
@@ -84,12 +84,13 @@ pub(crate) struct Catalog {
     pub tiers: HashMap<String, Tier>,
 }
 
-/// Accepts a catalog per products.md §3; `cached` is the version already held.
+/// Accepts a catalog of PI product `product` per products.md §3; `cached` is the version already
+/// held.
 pub(crate) fn verify(
     jws: &str,
     keys: &[PinnedKey],
     issuer: &str,
-    product: Product,
+    product: &str,
     cached: u64,
 ) -> Result<Catalog, VerifyError> {
     let payload = jose::verify_platform(jws, CATALOG_TYP, keys)?;
@@ -110,7 +111,7 @@ pub(crate) fn verify(
     if payload.get("iss").and_then(Value::as_str) != Some(issuer) {
         return Err(VerifyError::Issuer);
     }
-    if payload.get("product").and_then(Value::as_str) != Some(product.id()) {
+    if payload.get("product").and_then(Value::as_str) != Some(product) {
         return Err(VerifyError::Product);
     }
     let mut tiers = HashMap::new();

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{Account, Ops, lock};
 use crate::{
-    Error, Product, StoreError, WarningStage,
+    Error, StoreError, WarningStage,
     catalog::{self},
     device::Device,
     lease::{self, Expect, Lease},
@@ -18,20 +18,21 @@ use crate::{
 /// `session.json`. `profile` caches PI's `/me` so an offline start can show the user.
 ///
 /// The single `device_id` of v0.3.0 named a device of the old wire; unknown members are
-/// ignored, so it is read and dropped.
+/// ignored, so it is read and dropped. Maps are keyed by the family's PI product code; keys of
+/// another code (0.4.x Office keyed them by app id) are dropped at the next write.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct SessionFile {
     #[serde(default)]
     pub user_id: Option<String>,
     #[serde(default)]
     pub org_context: Option<String>,
-    /// PI device id per product id: PI keys a device by installation, product and account.
+    /// PI device id per PI product: PI keys a device by installation, product and account.
     #[serde(default)]
     pub device_ids: BTreeMap<String, String>,
-    /// Last refresh `timestamp` sent per product id; PI rejects one that is not above it.
+    /// Last refresh `timestamp` sent per PI product; PI rejects one that is not above it.
     #[serde(default)]
     pub last_refresh_ts: BTreeMap<String, i64>,
-    /// Product ids PI refused for want of a plan or seat (`LicenceState::NotEntitled`).
+    /// PI products refused for want of a plan or seat (`LicenceState::NotEntitled`).
     #[serde(default)]
     pub not_entitled: BTreeSet<String>,
     #[serde(default)]
@@ -71,7 +72,7 @@ impl SessionFile {
     }
 }
 
-/// `lease-<product_id>.json`.
+/// `lease-<pi_product>.json`.
 #[derive(Serialize, Deserialize)]
 struct LeaseFile {
     lease: String,
@@ -151,7 +152,7 @@ impl Account {
             view.signed_in = refresh_present;
             view.session = session;
         }
-        self.load_leases(ops)
+        self.load_lease(ops)
     }
 
     pub(super) fn read_session_disk(&self, ops: &Ops) -> Option<SessionFile> {
@@ -185,6 +186,10 @@ impl Account {
             time.mark_persisted(self.mono());
         }
         s.installation_id = device.installation_id.clone();
+        let own = self.cfg.profile.pi_product;
+        s.device_ids.retain(|k, _| k == own);
+        s.last_refresh_ts.retain(|k, _| k == own);
+        s.not_entitled.retain(|k| k == own);
         let body = serde_json::to_vec(s).map_err(|e| Error::Internal(e.to_string()))?;
         storage::write_atomic(
             &self.paths.session(),
@@ -239,39 +244,33 @@ impl Account {
         if !s.device_ids.is_empty() {
             s.device_ids.clear();
             s.last_refresh_ts.clear();
-            self.remove_leases(None)?;
+            self.remove_lease()?;
         }
         self.write_session(ops, &mut s, Floor::Max)?;
         Ok(device)
     }
 
-    /// Deletes every lease file except `keep`'s.
-    pub(super) fn remove_leases(&self, keep: Option<Product>) -> Result<(), Error> {
-        for &p in self
-            .cfg
-            .profile
-            .products
-            .iter()
-            .filter(|p| Some(**p) != keep)
-        {
-            storage::remove(&self.paths.lease(p))?;
-        }
-        let mut view = self.view_mut();
-        view.leases.retain(|p, _| Some(*p) == keep);
+    /// Deletes the family's lease, which every app of it shares.
+    pub(super) fn remove_lease(&self) -> Result<(), Error> {
+        storage::remove(&self.paths.lease(self.cfg.profile.pi_product))?;
+        self.view_mut().lease = None;
         Ok(())
     }
 
-    /// Deletes `product`'s lease file only.
-    pub(super) fn remove_lease(&self, product: Product) -> Result<(), Error> {
-        storage::remove(&self.paths.lease(product))?;
-        self.view_mut().leases.remove(&product);
+    /// Deletes the per-app lease and catalog files of 0.4.x, named by app id. UbotCAD's app id is
+    /// its PI product code, so its files are kept.
+    pub(super) fn remove_legacy_files(&self) -> Result<(), Error> {
+        let own = self.cfg.profile.pi_product;
+        for p in self.cfg.profile.products.iter().filter(|p| p.id() != own) {
+            storage::remove(&self.paths.lease(p.id()))?;
+            storage::remove(&self.paths.catalog(p.id()))?;
+        }
         Ok(())
     }
 
     pub(super) fn write_lease(
         &self,
         device: &Device,
-        product: Product,
         jws: &str,
         warnings_shown: Vec<u32>,
     ) -> Result<(), Error> {
@@ -281,7 +280,7 @@ impl Account {
         };
         let body = serde_json::to_vec(&file).map_err(|e| Error::Internal(e.to_string()))?;
         storage::write_atomic(
-            &self.paths.lease(product),
+            &self.paths.lease(self.cfg.profile.pi_product),
             &storage::seal(&body, device.signing_key()),
         )
     }
@@ -290,8 +289,8 @@ impl Account {
         &self,
         ops: &Ops,
         s: &SessionFile,
-        p: Product,
     ) -> Result<Option<Result<LeaseSlot, ()>>, Error> {
+        let p = self.cfg.profile.pi_product;
         let Some(bytes) = storage::read(&self.paths.lease(p))? else {
             return Ok(None);
         };
@@ -299,8 +298,8 @@ impl Account {
             return Ok(None);
         };
         // No device id for the product: the lease names a device this session does not know.
-        let Some(device_id) = s.device_ids.get(p.id()) else {
-            log::warn!("lease for {} has no device id in the session", p.id());
+        let Some(device_id) = s.device_ids.get(p) else {
+            log::warn!("lease for {p} has no device id in the session");
             return Ok(Some(Err(())));
         };
         let jkt = device.thumbprint();
@@ -323,34 +322,27 @@ impl Account {
                         lease,
                         warnings_shown: f.warnings_shown,
                     })
-                    .map_err(|e| log::warn!("lease for {} rejected on load: {e:?}", p.id()))
+                    .map_err(|e| log::warn!("lease for {p} rejected on load: {e:?}"))
             });
         Ok(Some(slot))
     }
 
-    /// Loads the lease file of every product of this client family (lease.md §9 on load). Only this app's invalid lease is deleted.
-    pub(super) fn load_leases(&self, ops: &mut Ops) -> Result<(), Error> {
-        let mut leases = BTreeMap::new();
-        let mut invalid_own = false;
+    /// Loads the family's lease file (lease.md §9 on load) and deletes it when invalid.
+    pub(super) fn load_lease(&self, ops: &mut Ops) -> Result<(), Error> {
         let session = self.view().session.clone();
-        for &p in self.cfg.profile.products {
-            match self.read_lease(ops, &session, p)? {
-                Some(Ok(slot)) => {
-                    leases.insert(p, slot);
-                }
-                Some(Err(())) => invalid_own |= p == self.cfg.product,
-                None => {}
-            }
-        }
-        self.view_mut().leases = leases;
-        if invalid_own {
-            let own = self.cfg.product;
+        let (slot, invalid) = match self.read_lease(ops, &session)? {
+            Some(Ok(slot)) => (Some(slot), false),
+            Some(Err(())) => (None, true),
+            None => (None, false),
+        };
+        self.view_mut().lease = slot;
+        if invalid {
             self.locked(ops, |ops| {
                 // Another app may have written a valid lease, and its device id, since the
                 // first read; judge it against the session on disk.
                 let current = self.read_session_disk(ops).unwrap_or(session);
-                if let Some(Err(())) = self.read_lease(ops, &current, own)? {
-                    storage::remove(&self.paths.lease(own))?;
+                if let Some(Err(())) = self.read_lease(ops, &current)? {
+                    storage::remove(&self.paths.lease(self.cfg.profile.pi_product))?;
                 }
                 Ok(())
             })?;
@@ -358,9 +350,10 @@ impl Account {
         Ok(())
     }
 
-    /// Re-verifies `catalog-<product>.jws` with the platform key (products.md §3).
+    /// Re-verifies `catalog-<pi_product>.jws` with the platform key (products.md §3).
     pub(super) fn load_catalog_file(&self) {
-        let Ok(Some(bytes)) = storage::read(&self.paths.catalog(self.cfg.product)) else {
+        let product = self.cfg.profile.pi_product;
+        let Ok(Some(bytes)) = storage::read(&self.paths.catalog(product)) else {
             return;
         };
         let Ok(jws) = String::from_utf8(bytes) else {
@@ -371,7 +364,7 @@ impl Account {
             jws.trim(),
             &self.cfg.platform_keys,
             &self.cfg.issuer,
-            self.cfg.product,
+            product,
             current,
         ) {
             Ok(c) => self.view_mut().catalog = Some(c),
@@ -394,7 +387,7 @@ impl Account {
                 self.store
                     .delete(REFRESH_TOKEN_ENTRY)
                     .map_err(store_error)?;
-                self.remove_leases(None)?;
+                self.remove_lease()?;
                 ops.device = self
                     .store
                     .get(DEVICE_ENTRY)
@@ -419,7 +412,7 @@ impl Account {
         };
         let mut view = self.view_mut();
         view.signed_in = false;
-        view.leases.clear();
+        view.lease = None;
         view.entitlements = None;
         view.reauth = false;
         view.session.clear_identity();
@@ -454,7 +447,7 @@ impl Account {
             };
             self.write_session(ops, &mut s, Floor::Max)?;
             if changed && !force {
-                self.load_leases(ops)?;
+                self.load_lease(ops)?;
             }
             Ok(())
         })
@@ -464,10 +457,9 @@ impl Account {
         if !self.persistent {
             return Ok(());
         }
-        let product = self.cfg.product;
         self.locked(ops, |ops| {
             self.reload_with(ops)?;
-            let Some(mut slot) = self.view().leases.get(&product).cloned() else {
+            let Some(mut slot) = self.view().lease.clone() else {
                 return Ok(());
             };
             let device = ops
@@ -477,8 +469,8 @@ impl Account {
             if !slot.warnings_shown.contains(&stage.days()) {
                 slot.warnings_shown.push(stage.days());
             }
-            self.write_lease(&device, product, &slot.lease.jws, slot.warnings_shown)?;
-            self.load_leases(ops)
+            self.write_lease(&device, &slot.lease.jws, slot.warnings_shown)?;
+            self.load_lease(ops)
         })
     }
 }

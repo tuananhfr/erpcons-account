@@ -1,6 +1,6 @@
 //! Messages the device signs for PI's activate and refresh, and the feature-code rules
 //! around them.
-use crate::{Product, VerifyError};
+use crate::VerifyError;
 
 /// Codes PI uses for its own bookkeeping; they never become client features.
 pub(crate) const INTERNAL_CODES: [&str; 2] = ["offline", "offline-extended"];
@@ -35,9 +35,9 @@ pub(crate) fn is_feature_code(s: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_' || *c == b'-')
 }
 
-/// PI feature codes to `<product id>.<code>`, keeping the input order.
+/// PI feature codes to `<pi_product>.<code>`, keeping the input order.
 pub(crate) fn compose_features(
-    product: Product,
+    pi_product: &str,
     codes: &[String],
 ) -> Result<Vec<String>, VerifyError> {
     let mut features = Vec::with_capacity(codes.len());
@@ -46,7 +46,7 @@ pub(crate) fn compose_features(
             return Err(VerifyError::Feature);
         }
         if !INTERNAL_CODES.contains(&code.as_str()) {
-            features.push(format!("{}.{code}", product.id()));
+            features.push(format!("{pi_product}.{code}"));
         }
     }
     Ok(features)

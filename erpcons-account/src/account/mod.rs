@@ -72,7 +72,8 @@ struct Access {
 struct View {
     signed_in: bool,
     session: SessionFile,
-    leases: BTreeMap<Product, LeaseSlot>,
+    /// The family's one lease, shared by its apps (ADR 0013).
+    lease: Option<LeaseSlot>,
     catalog: Option<Catalog>,
     entitlements: Option<(Vec<Entitlement>, Duration)>,
     online: bool,
@@ -115,6 +116,10 @@ impl Account {
             server_offset: AtomicI64::new(0),
             cfg: config,
         };
+        // Leftovers are never read again, so a failed delete only costs disk space.
+        if let Err(e) = account.remove_legacy_files() {
+            log::warn!("0.4.x lease files not removed: {e}");
+        }
         {
             let mut ops = lock(&account.ops);
             account.reload_with(&mut ops)?;
@@ -141,12 +146,13 @@ impl Account {
         let now = self.effective_now();
         let s = &view.session;
         let profile = s.profile.as_ref();
+        let licence = self.licence(&view, now);
         let licences: BTreeMap<Product, LicenceState> = self
             .cfg
             .profile
             .products
             .iter()
-            .map(|&p| (p, self.licence(&view, p, now)))
+            .map(|&p| (p, licence.clone()))
             .collect();
         Status::SignedIn(Box::new(SignedIn {
             user: s.user_id.as_ref().zip(profile).map(|(id, p)| User {
@@ -156,7 +162,7 @@ impl Account {
             }),
             orgs: profile.map(|p| p.memberships.clone()).unwrap_or_default(),
             active_org: s.org_context.clone(),
-            licence: self.licence(&view, self.cfg.product, now),
+            licence,
             licences,
             warning: self.warning(&view, now),
             online: view.online,
@@ -187,7 +193,7 @@ impl Account {
         let now = self.effective_now();
         if self.cfg.offline_licensing
             && matches!(
-                self.licence(&view, self.cfg.product, now),
+                self.licence(&view, now),
                 LicenceState::DeviceRevoked
                     | LicenceState::DeviceCapReached
                     | LicenceState::SessionOnly
@@ -195,7 +201,7 @@ impl Account {
         {
             return false;
         }
-        if let Some(slot) = view.leases.get(&self.cfg.product)
+        if let Some(slot) = &view.lease
             && slot.lease.window(now).is_ok()
             && slot.lease.features.iter().any(|f| f == feature)
         {
@@ -236,7 +242,7 @@ impl Account {
         result
     }
 
-    /// Signs out all four apps: revokes the refresh token, wipes session secrets and leases.
+    /// Signs out all four apps: revokes the refresh token, wipes session secrets and the lease.
     /// The device key, `installation_id` and `trusted_floor` stay; documents are never touched.
     /// The next sign-in asks PI for `prompt=login`, since PI's browser session outlives this.
     pub fn sign_out(&self) -> Result<(), Error> {
@@ -252,7 +258,7 @@ impl Account {
         }
         let mut ops = lock(&self.ops);
         self.reload_with(&mut ops)?;
-        let product = self.cfg.product.id();
+        let product = self.cfg.profile.pi_product;
         self.update_session(&mut ops, |s| {
             s.device_cap_reached = false;
             s.not_entitled.remove(product);
@@ -274,7 +280,11 @@ impl Account {
             clock_rolled_back: lock(&self.time).rolled_back(),
             effective_now: now,
             installation_id: Some(view.session.installation_id.clone()).filter(|i| !i.is_empty()),
-            device_id: view.session.device_ids.get(self.cfg.product.id()).cloned(),
+            device_id: view
+                .session
+                .device_ids
+                .get(self.cfg.profile.pi_product)
+                .cloned(),
         }
     }
 
@@ -303,14 +313,15 @@ impl Account {
         }
     }
 
-    fn licence(&self, view: &View, p: Product, now: i64) -> LicenceState {
+    /// The family's licence: every app of it reads the same lease (ADR 0013).
+    fn licence(&self, view: &View, now: i64) -> LicenceState {
         if !self.persistent {
             return LicenceState::SessionOnly;
         }
         if view.session.device_revoked {
             return LicenceState::DeviceRevoked;
         }
-        match view.leases.get(&p) {
+        match &view.lease {
             Some(slot) if slot.lease.window(now).is_ok() => LicenceState::Active {
                 lease_id: slot.lease.lease_id.clone(),
                 features: slot.lease.features.clone(),
@@ -320,7 +331,13 @@ impl Account {
                 lease_id: slot.lease.lease_id.clone(),
                 expires_at: slot.lease.exp,
             },
-            None if view.session.not_entitled.contains(p.id()) => LicenceState::NotEntitled,
+            None if view
+                .session
+                .not_entitled
+                .contains(self.cfg.profile.pi_product) =>
+            {
+                LicenceState::NotEntitled
+            }
             None if view.session.device_cap_reached => LicenceState::DeviceCapReached,
             None => LicenceState::NotActivated,
         }
@@ -328,7 +345,7 @@ impl Account {
 
     /// Warning at 7, 3 and 1 days, only while the lease grants a `pro` feature (lease.md §8).
     fn warning(&self, view: &View, now: i64) -> Option<ExpiryWarning> {
-        let slot = view.leases.get(&self.cfg.product)?;
+        let slot = view.lease.as_ref()?;
         slot.lease.window(now).ok()?;
         let grants_pro = slot.lease.features.iter().any(|f| {
             catalog::tier(&self.cfg.builtin_features, view.catalog.as_ref(), f) == Some(Tier::Pro)

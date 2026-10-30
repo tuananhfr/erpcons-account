@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.5.0
+
+Office licensing is on again, as one PI product for the four apps (ADR 0013). UbotCAD is unchanged.
+
+### Breaking
+
+- Office feature ids are `erpconsoffice.view`, `erpconsoffice.export` and `erpconsoffice.use`
+  (constants `OFFICE_VIEW`, `OFFICE_EXPORT`, `OFFICE_USE`); the per-app ids (`vanban.use`, ...) are
+  no longer valid. `is_valid_feature_id` and `is_pinned_free` take a PI product code as prefix.
+- `erpconsoffice.use` is `pro` in the built-in catalog: it needs a lease (or fresh online
+  entitlements), so it is denied to guests and while `Config::offline_licensing` is off.
+- `ClientProfile` has new fields `pi_product` and `pinned_free`; struct literals must provide them.
+- One device registration and one lease, `lease-erpconsoffice.json`, for the four Office apps instead
+  of one per app. `Status::licence` is that lease's state; `Status::licences` repeats it per app.
+- pi-mock: both Office clients carry product `erpconsoffice`, so their access tokens have `aud`
+  `["pi-platform", "erpconsoffice"]`.
+
+### Added
+
+- `OFFICE_PI_PRODUCT`, `Product::pi_product`, `ClientProfile::ALL` and
+  `ClientProfile::for_pi_product`.
+- pi-mock: `erpconsoffice` in the product registry, `FREE_OFFICE`, `OFFICE_PRODUCT`, `ORG_OFFICE`,
+  `Tenant::office_free`, `Scenario::office_free` and the binary flag `--office-free`.
+
+### Changed
+
+- A lease renewal re-checks under `pi.lock`, so concurrent apps of one family renew the shared lease
+  once.
+- State of 0.4.x is discarded on upgrade: `Account::new` deletes `lease-<app id>.json` and
+  `catalog-<app id>.jws` of the Office apps, and session maps keep only the family's PI product.
+  0.4.x Office never activated, so nothing usable is lost.
+
 ## 0.4.2
 
 ### Added

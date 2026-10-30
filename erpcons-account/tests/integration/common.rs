@@ -9,8 +9,9 @@ use std::{
 };
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use ed25519_dalek::{Signer, SigningKey};
 use erpcons_account::{
-    Account, BuiltinFeature, Clock, Config, MemorySecretStore, PinnedKey, Product,
+    Account, BuiltinFeature, Clock, Config, DEVICE_ENTRY, MemorySecretStore, PinnedKey, Product,
     REFRESH_TOKEN_ENTRY, SecretStore, SignedIn, Status, Tier,
 };
 use pi_mock::{FREE_UBOTCAD, ORG_A, RecordedRequest, Scenario, Server, Tenant};
@@ -94,7 +95,7 @@ impl Env {
         c.max_retry_wait = Duration::from_secs(3);
         c.sign_in_timeout = Duration::from_secs(20);
         c.builtin_features.push(BuiltinFeature::new(
-            format!("{}.advanced", product.id()),
+            format!("{}.advanced", product.pi_product()),
             Tier::Free,
         ));
         c
@@ -137,7 +138,30 @@ impl Env {
             .collect()
     }
 
-    /// Claims of the lease stored for `product`.
+    /// Seals a shared-directory file body with the stored device key, as the library does.
+    pub fn seal(&self, body: &str) -> String {
+        let entry: serde_json::Value =
+            serde_json::from_str(&self.store.get(DEVICE_ENTRY).unwrap().unwrap()).unwrap();
+        let seed: [u8; 32] = URL_SAFE_NO_PAD
+            .decode(entry["key"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let sig = URL_SAFE_NO_PAD.encode(
+            SigningKey::from_bytes(&seed)
+                .sign(body.as_bytes())
+                .to_bytes(),
+        );
+        format!("{body}\n{sig}\n")
+    }
+
+    /// Body of the signed `session.json`.
+    pub fn session_json(&self) -> serde_json::Value {
+        let sealed = std::fs::read_to_string(self.file("session.json")).unwrap();
+        serde_json::from_str(sealed.lines().next().unwrap()).unwrap()
+    }
+
+    /// Claims of the lease stored for PI product `product`.
     pub fn lease_claims(&self, product: &str) -> serde_json::Value {
         let sealed = std::fs::read_to_string(self.file(&format!("lease-{product}.json"))).unwrap();
         let body: serde_json::Value = serde_json::from_str(sealed.lines().next().unwrap()).unwrap();

@@ -20,9 +20,10 @@ pub struct SignedIn {
     pub orgs: Vec<Membership>,
     /// `orgContext` of PI's `/me`; `None` is the personal context.
     pub active_org: Option<String>,
-    /// Licence of this app's product; `NotActivated` while `Config::offline_licensing` is off.
+    /// Licence of the client family's PI product on this device, shared by its apps (ADR 0013);
+    /// `NotActivated` while `Config::offline_licensing` is off.
     pub licence: LicenceState,
-    /// Licence of each of the four products on this device.
+    /// [`SignedIn::licence`] for each app of the family: since 0.5.0 the same value for all.
     pub licences: BTreeMap<Product, LicenceState>,
     /// Expiry warning still to show (lease.md §8).
     pub warning: Option<ExpiryWarning>,
@@ -57,7 +58,7 @@ pub enum MembershipStatus {
     Suspended,
 }
 
-/// Offline licence of one product.
+/// Offline licence of a PI product on this device.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LicenceState {
     NotActivated,

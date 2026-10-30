@@ -282,7 +282,7 @@ impl Account {
             let same = previous.user_id.as_deref() == Some(me.user_id.as_str())
                 && previous.org_context == me.org_context;
             if !same {
-                self.remove_leases(None)?;
+                self.remove_lease()?;
             }
             let mut s = SessionFile {
                 user_id: Some(me.user_id.clone()),
@@ -442,7 +442,7 @@ impl Account {
             Some(ApiCode::MembershipInactive) => {
                 // PI refuses this token family's organization from now on, refresh included;
                 // only a new sign-in (another organization or personal) gives a usable session.
-                self.remove_leases(None)?;
+                self.remove_lease()?;
                 self.view_mut().reauth = true;
             }
             _ => {}
@@ -473,7 +473,7 @@ impl Account {
             if s.user_id.as_deref() != Some(me.user_id.as_str()) || s.org_context != me.org_context
             {
                 // A different sub or context makes every lease and device id stale (§8).
-                self.remove_leases(None)?;
+                self.remove_lease()?;
                 s.device_ids.clear();
                 s.last_refresh_ts.clear();
                 s.not_entitled.clear();
@@ -485,21 +485,21 @@ impl Account {
             s.org_context = me.org_context.clone();
             s.profile = Some(profile(&me));
             self.write_session(ops, &mut s, Floor::Max)?;
-            self.load_leases(ops)
+            self.load_lease(ops)
         })
     }
 
-    /// PI's entitlement rows for this product in the token's organization; the personal
-    /// context holds none, since PI grants products to organizations.
+    /// PI's entitlement rows for the family's PI product in the token's organization; the
+    /// personal context holds none, since PI grants products to organizations.
     pub(super) fn fetch_entitlements(&self, ops: &mut Ops) -> Result<(), Error> {
-        let product = self.cfg.product;
+        let product = self.cfg.profile.pi_product;
         let org = self.view().session.org_context.clone();
         let list = match org {
             None => Vec::new(),
             Some(org) => {
                 let url = self.cfg.pi_url(&format!(
                     "/me/entitlements?product_id={}",
-                    query_escape(product.id())
+                    query_escape(product)
                 ));
                 let reply = self.api_get(ops, &url)?;
                 entitlements::parse(&reply.body, product, &org)?

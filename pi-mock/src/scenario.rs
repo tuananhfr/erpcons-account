@@ -33,6 +33,10 @@ pub const DEFAULT_USER: &str = "6f3b1c2a-9d4e-4f8a-b1c7-2e5d8a9f0b13";
 /// PI `org_id`s of the default user's two organizations; `org_hint` only takes UUIDs.
 pub const ORG_A: &str = "0c9e7a51-3b2d-4c6f-8e1a-5d7b9f2c4e60";
 pub const ORG_B: &str = "a4d2f6b8-1e3c-4a5b-9c7d-8e0f2a4b6c81";
+/// The one-person organization PI creates with the Office free plan ([`Scenario::office_free`]).
+pub const ORG_OFFICE: &str = "5b8e1d3f-7a2c-4e9b-a6d0-3f1c8e5b2a74";
+/// PI product code of the four Office apps; both Office clients carry it.
+pub const OFFICE_PRODUCT: &str = "erpconsoffice";
 
 pub const DESKTOP_CLIENT: &str = "erpcons-office-desktop";
 /// UbotCAD's desktop client; same scopes and loopback redirect as the Office one.
@@ -86,6 +90,7 @@ impl Default for Scenario {
             tenants: Vec::new(),
             products: [
                 "erpcons",
+                OFFICE_PRODUCT,
                 "tekshot",
                 "ubotbuild",
                 "corporatehealth",
@@ -180,6 +185,22 @@ impl Membership {
 
 /// Features of the UbotBuild free plan (`UbotbuildMeta`); `offline` is PI-internal.
 pub const FREE_UBOTCAD: [&str; 4] = ["cad-view", "cad-export", "cad-use", "offline"];
+/// Features of the Office free plan `office-mien-phi`; `offline` is PI-internal.
+pub const FREE_OFFICE: [&str; 4] = ["view", "export", "use", "offline"];
+
+impl Scenario {
+    /// A PI ID that signed up through Office: its only organization is the one-person one PI
+    /// created with the Office free plan, so sign-in lands in it. The auto-provisioning itself
+    /// (PI's first Office sign-in) is not modelled.
+    pub fn office_free() -> Self {
+        let mut scenario = Self::default();
+        for user in &mut scenario.users {
+            user.memberships = vec![Membership::new(ORG_OFFICE, &user.display_name, "org_owner")];
+        }
+        scenario.tenants = vec![Tenant::office_free("ten_office", ORG_OFFICE)];
+        scenario
+    }
+}
 
 /// A PI tenant: an organization's subscription to a product, with its device policy.
 #[derive(Clone, Debug)]
@@ -215,6 +236,14 @@ impl Tenant {
             unlimited_seats: true,
             valid_to: None,
             plan: "ubb-mien-phi@1".into(),
+        }
+    }
+
+    /// The Office free plan of `org`: 2 devices, 7-day leases, unlimited seats.
+    pub fn office_free(tenant_id: &str, org_id: &str) -> Self {
+        Self {
+            plan: "office-mien-phi@1".into(),
+            ..Self::new(tenant_id, org_id, OFFICE_PRODUCT, &FREE_OFFICE)
         }
     }
 

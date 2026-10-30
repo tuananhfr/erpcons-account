@@ -3,6 +3,11 @@
 Scope: the desktop apps. Web never activates and never holds a lease (ADR 0004). Field names
 match `contract.openapi.yaml` exactly. MUST/SHOULD/MAY as in RFC 2119.
 
+The wire, claims and checks are now PI's (ADR 0012). Since 0.5.0 the four Office apps are one PI
+product, `erpconsoffice`: where this document says "per product" or "the app's `product_id`" for
+Office, read one device, one lease file `lease-erpconsoffice.json` and one `product` claim
+`erpconsoffice` shared by the four apps (ADR 0013).
+
 A lease is a platform-signed statement: user `sub`, in context `org`, may use `features` of
 `product` on the device that holds the key `cnf.jkt`, until `exp`. It is what lets a `pro`
 feature work offline (HS02). Free features never need a lease (ADR 0005).
@@ -236,8 +241,8 @@ in all four, and signing out from any app signs out all four.
 | Device private key and `installation_id` | Same service, one entry |
 | Access token, ID token | Memory of each process only, never persisted |
 | `session.json`: `user_id`, `org_context`, `device_id`, `installation_id`, `trusted_floor`, activation blocks (`device_revoked`, `device_cap_reached`) | Shared PI directory, signed with the device key |
-| `lease-<product_id>.json`: `lease`, warnings shown | Shared PI directory, one file per product, signed with the device key |
-| `catalog-<product_id>.jws`: verified feature catalog | Shared PI directory; re-verified with the platform key on load (also used by guests) |
+| `lease-<pi_product>.json`: `lease`, warnings shown | Shared PI directory, one file per client family (`erpconsoffice`, `ubotbuild`; ADR 0013), signed with the device key |
+| `catalog-<pi_product>.jws`: verified feature catalog | Shared PI directory; re-verified with the platform key on load (also used by guests) |
 | `pi.lock` | Shared PI directory: exclusive lock file |
 
 Shared PI directory: Windows `%APPDATA%\ERPCons\PI\`, macOS

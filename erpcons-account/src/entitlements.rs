@@ -2,7 +2,7 @@
 //! check (products.md §4).
 use serde::Deserialize;
 
-use crate::{Error, Product, pi_device::compose_features};
+use crate::{Error, pi_device::compose_features};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Entitlement {
@@ -48,15 +48,15 @@ struct Offline {
     allowed: bool,
 }
 
-/// Features of the rows that grant `product` in `org` (`ALLOW` with a seat); a row of another
-/// product or organization discards the whole response; a row with an invalid feature code is
-/// skipped.
-pub(crate) fn parse(body: &[u8], product: Product, org: &str) -> Result<Vec<Entitlement>, Error> {
+/// Features of the rows that grant PI product `product` in `org` (`ALLOW` with a seat); a row of
+/// another product or organization discards the whole response; a row with an invalid feature
+/// code is skipped.
+pub(crate) fn parse(body: &[u8], product: &str, org: &str) -> Result<Vec<Entitlement>, Error> {
     let list: List = serde_json::from_slice(body).map_err(|e| Error::BadResponse(e.to_string()))?;
     let foreign = list
         .items
         .iter()
-        .any(|r| r.organization.id != org || r.tenant.product != product.id());
+        .any(|r| r.organization.id != org || r.tenant.product != product);
     if foreign {
         log::error!(
             "tenant isolation incident: entitlements for another product or tenant discarded"

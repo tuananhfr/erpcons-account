@@ -5,7 +5,7 @@ use std::{collections::BTreeSet, sync::atomic::Ordering};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{Account, Ops, lock, shared::Floor};
+use super::{Account, Ops, View, lock, shared::Floor};
 use crate::{
     ApiCode, Error, VerifyError,
     device::Device,
@@ -40,12 +40,12 @@ struct Challenge {
 }
 
 impl Account {
-    /// Activates or refreshes this app's lease when lease.md §6 says so.
+    /// Activates or refreshes the family's lease when lease.md §6 says so.
     pub(super) fn sync_licence(&self, ops: &mut Ops) -> Result<(), Error> {
         if !self.persistent || !self.cfg.offline_licensing {
             return Ok(());
         }
-        let product = self.cfg.product.id();
+        let product = self.cfg.profile.pi_product;
         let now = self.effective_now();
         let (ready, activated, due, lift) = {
             let view = self.view();
@@ -62,18 +62,7 @@ impl Account {
                 && !s.device_revoked
                 && !s.device_cap_reached
                 && (!refused || granted);
-            let due = view.leases.get(&self.cfg.product).map(|slot| {
-                now - slot.lease.iat >= LEASE_REFRESH_EVERY
-                    || slot.lease.window(now).is_err()
-                    || view.entitlements.as_ref().is_some_and(|(list, _)| {
-                        let granted: BTreeSet<&str> = list
-                            .iter()
-                            .filter(|e| e.offline_allowed)
-                            .map(|e| e.feature.as_str())
-                            .collect();
-                        granted != slot.lease.features.iter().map(String::as_str).collect()
-                    })
-            });
+            let due = lease_due(&view, now);
             (
                 ready,
                 s.device_ids.contains_key(product),
@@ -94,7 +83,8 @@ impl Account {
         }
     }
 
-    /// Challenge, then `POST /devices/activate` for this product, under the shared lock.
+    /// Challenge, then `POST /devices/activate` for the family's PI product, under the shared
+    /// lock.
     pub(super) fn activate(&self, ops: &mut Ops) -> Result<(), Error> {
         self.activate_with(ops, false)
     }
@@ -107,7 +97,7 @@ impl Account {
         if !self.persistent {
             return Err(Error::CredentialStoreUnavailable);
         }
-        let product = self.cfg.product;
+        let product = self.cfg.profile.pi_product;
         self.locked(ops, |ops| {
             self.reload_with(ops)?;
             {
@@ -120,16 +110,16 @@ impl Account {
                 if s.org_context.is_none()
                     || s.device_revoked
                     || s.device_cap_reached
-                    || s.not_entitled.contains(product.id())
+                    || s.not_entitled.contains(product)
                 {
                     return Err(Error::ActivationBlocked);
                 }
                 let now = self.effective_now();
-                // Another app may have activated this product while we waited for the lock.
+                // Another app of the family may have activated while we waited for the lock.
                 if !replace_lease
                     && view
-                        .leases
-                        .get(&product)
+                        .lease
+                        .as_ref()
                         .is_some_and(|l| l.lease.window(now).is_ok())
                 {
                     return Ok(());
@@ -154,7 +144,7 @@ impl Account {
 
     fn activate_once(&self, ops: &mut Ops) -> Result<(), Error> {
         let device = self.ensure_device(ops)?;
-        let product = self.cfg.product.id();
+        let product = self.cfg.profile.pi_product;
         let url = self.cfg.pi_url(&format!(
             "/devices/challenge?product_id={}",
             query_escape(product)
@@ -187,12 +177,16 @@ impl Account {
         self.accept_lease(ops, &device, &response, &challenge.nonce)
     }
 
-    /// `POST /licenses/refresh` for this product, under the shared lock.
+    /// `POST /licenses/refresh` of the family's lease, under the shared lock.
     pub(super) fn refresh_lease(&self, ops: &mut Ops) -> Result<(), Error> {
-        let product = self.cfg.product;
+        let product = self.cfg.profile.pi_product;
         self.locked(ops, |ops| {
             self.reload_with(ops)?;
-            let device_id = self.view().session.device_ids.get(product.id()).cloned();
+            // Another app of the family may have renewed the shared lease while we waited.
+            if lease_due(&self.view(), self.effective_now()) == Some(false) {
+                return Ok(());
+            }
+            let device_id = self.view().session.device_ids.get(product).cloned();
             let Some(device_id) = device_id else {
                 return self.activate(ops);
             };
@@ -209,7 +203,6 @@ impl Account {
                     Error::Api(e)
                         if e.status == 422 && e.errors.iter().any(|f| f == "timestamp") =>
                     {
-                        let product = product.id();
                         self.update_session(ops, |s| match before_send {
                             Some(t) => {
                                 s.last_refresh_ts.insert(product.to_owned(), t);
@@ -236,7 +229,7 @@ impl Account {
         })
     }
 
-    /// `before_send` gets this product's `last_refresh_ts` as it was before the last send.
+    /// `before_send` gets the family's `last_refresh_ts` as it was before the last send.
     fn refresh_once(
         &self,
         ops: &mut Ops,
@@ -269,7 +262,7 @@ impl Account {
         device: &Device,
         device_id: &str,
     ) -> Result<(Vec<u8>, String, Option<i64>), Error> {
-        let product = self.cfg.product.id();
+        let product = self.cfg.profile.pi_product;
         let mut s = self
             .read_session_disk(ops)
             .unwrap_or_else(|| self.view().session.clone());
@@ -303,7 +296,7 @@ impl Account {
         if r.lease.len() > MAX_JWS {
             return Err(Error::Lease(VerifyError::Format));
         }
-        let product = self.cfg.product;
+        let product = self.cfg.profile.pi_product;
         let session = self.view().session.clone();
         let sub = session.user_id.as_deref().ok_or(Error::NotSignedIn)?;
         let jkt = device.thumbprint();
@@ -336,15 +329,14 @@ impl Account {
             })
             .map_err(|e| self.rejected(e))?;
         let mut s = self.read_session_disk(ops).unwrap_or(session);
-        s.device_ids
-            .insert(product.id().to_owned(), r.device_id.clone());
-        s.not_entitled.remove(product.id());
+        s.device_ids.insert(product.to_owned(), r.device_id.clone());
+        s.not_entitled.remove(product);
         s.device_cap_reached = false;
         let floor = if corrected { Floor::Exact } else { Floor::Max };
         // The device id is stored first: on load, a lease without one is deleted as stale.
         self.write_session(ops, &mut s, floor)?;
-        self.write_lease(device, product, &r.lease, Vec::new())?;
-        self.load_leases(ops)
+        self.write_lease(device, &r.lease, Vec::new())?;
+        self.load_lease(ops)
     }
 
     fn rejected(&self, e: VerifyError) -> Error {
@@ -354,26 +346,44 @@ impl Account {
 
     /// Device-specific actions for PI's activation and refresh errors.
     fn on_device_error(&self, ops: &mut Ops, error: &Error) -> Result<(), Error> {
-        let product = self.cfg.product;
+        let product = self.cfg.profile.pi_product;
         match error.api_code() {
             Some(ApiCode::DeviceCapReached) => {
                 self.update_session(ops, |s| s.device_cap_reached = true)
             }
             Some(ApiCode::DeviceRevoked) => {
-                self.remove_leases(None)?;
+                self.remove_lease()?;
                 self.update_session(ops, |s| {
                     s.device_ids.clear();
                     s.device_revoked = true;
                 })
             }
             Some(ApiCode::NoEntitlement | ApiCode::NoSeat | ApiCode::OrgContextRequired) => {
-                log::warn!("PI holds no plan or seat for {}", product.id());
-                self.remove_lease(product)?;
+                log::warn!("PI holds no plan or seat for {product}");
+                self.remove_lease()?;
                 self.update_session(ops, |s| {
-                    s.not_entitled.insert(product.id().to_owned());
+                    s.not_entitled.insert(product.to_owned());
                 })
             }
             _ => Ok(()),
         }
     }
+}
+
+/// Whether the held lease needs a refresh (lease.md §6): 12 h old, outside its window, or no
+/// longer matching PI's offline entitlements. `None` without a lease.
+fn lease_due(view: &View, now: i64) -> Option<bool> {
+    let slot = view.lease.as_ref()?;
+    Some(
+        now - slot.lease.iat >= LEASE_REFRESH_EVERY
+            || slot.lease.window(now).is_err()
+            || view.entitlements.as_ref().is_some_and(|(list, _)| {
+                let granted: BTreeSet<&str> = list
+                    .iter()
+                    .filter(|e| e.offline_allowed)
+                    .map(|e| e.feature.as_str())
+                    .collect();
+                granted != slot.lease.features.iter().map(String::as_str).collect()
+            }),
+    )
 }

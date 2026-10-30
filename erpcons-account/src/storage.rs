@@ -7,7 +7,7 @@ use std::{
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 
-use crate::{ClientProfile, Error, Product, jose};
+use crate::{ClientProfile, Error, jose};
 
 const MAX_FILE: u64 = 64 << 10;
 
@@ -23,11 +23,12 @@ impl Paths {
     pub(crate) fn session(&self) -> PathBuf {
         self.dir.join("session.json")
     }
-    pub(crate) fn lease(&self, p: Product) -> PathBuf {
-        self.dir.join(format!("lease-{}.json", p.id()))
+    /// `code` is a PI product code; 0.4.x Office files used the app id instead.
+    pub(crate) fn lease(&self, code: &str) -> PathBuf {
+        self.dir.join(format!("lease-{code}.json"))
     }
-    pub(crate) fn catalog(&self, p: Product) -> PathBuf {
-        self.dir.join(format!("catalog-{}.jws", p.id()))
+    pub(crate) fn catalog(&self, code: &str) -> PathBuf {
+        self.dir.join(format!("catalog-{code}.jws"))
     }
     fn lock(&self) -> PathBuf {
         self.dir.join("pi.lock")
